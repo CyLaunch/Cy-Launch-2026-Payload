@@ -1,16 +1,13 @@
-Here’s a clean, **professional README.md** you can drop straight into your CyLaunch repo. I wrote it like a real flight-hardware project (NASA SLI-style documentation tone since that fits your payload work).
-
----
-
 # 🚀 CyLaunch 2026 Payload Device
 
 ## Overview
 
-The **CyLaunch 2026 Payload Device** is a hybrid avionics and telemetry system designed for high-reliability data collection and motor actuation during rocket flight operations. The payload integrates a Raspberry Pi–based processing unit with Feather-class microcontrollers and LoRa radios to enable sensor acquisition, motor control, and long-range wireless communication.
+The **CyLaunch 2026 Payload Device** is a hybrid avionics and telemetry system designed for high-reliability data collection and motor actuation during rocket flight operations. The system is split across two subsystems — the **Nosecone** and the **Rover (Payload)** — each built around an Adafruit Feather M4 Express with a stacked RFM9x LoRa FeatherWing for communication.
 
 This system supports:
 
 * Real-time telemetry transmission
+* Flight detection (launch, apogee, landing) via sensor fusion
 * Absolute orientation sensing
 * Remote command capability
 * Multi-motor actuation
@@ -20,160 +17,153 @@ This system supports:
 
 ## System Architecture
 
-### Primary Components
+The system is composed of two independent but communicating units:
 
-* **Raspberry Pi 3B**
+### Nosecone Unit
 
-  * Main processing computer
-  * Handles telemetry, high-level logic, and radio communication
+Responsible for flight detection (launch, apogee, landing) and telemetry relay.
 
-* **Adafruit Feather M4 Express**
+| Component | Role |
+|---|---|
+| Adafruit Feather M4 Express | Main microcontroller |
+| RFM9x LoRa FeatherWing (433 MHz) | Wireless telemetry (stacked) |
+| Adafruit ICM-20948 9-DOF IMU | Accelerometer / gyro for flight detection |
+| Adafruit MPL3115A2 Altimeter | Barometric altitude |
 
-  * Real-time microcontroller
-  * Responsible for precise timing and hardware control tasks
+### Rover (Payload) Unit
 
-* **3 × Bigfoot25 Motors**
+Responsible for post-landing orientation, drive motor control, and sensor acquisition.
 
-  * Controlled via ESC/PWM outputs
-  * Used for mechanical deployment or actuation mechanisms
+| Component | Role |
+|---|---|
+| Adafruit Feather M4 Express | Main microcontroller |
+| RFM9x LoRa FeatherWing (433 MHz) | Wireless telemetry (stacked) |
+| Adafruit ICM-20948 9-DOF IMU | Accelerometer / gyro for flight detection |
+| Adafruit MPL3115A2 Altimeter | Barometric altitude |
+| Adafruit BNO055 Absolute Orientation IMU | Post-landing orientation correction |
+| Adafruit PCA9685 16-Channel PWM Driver | ESC/motor control via I2C |
+| 3× Bigfoot25 Brushless Motors + ESCs | 1× orientation, 2× drive wheels |
 
-* **2 × Adafruit RFM9x LoRa FeatherWing (433 MHz)**
+---
 
-  * Radio #1 mounted on Feather M4
-  * Radio #2 connected to Raspberry Pi
-  * Enables bidirectional payload communication
+## Communication Architecture
 
-* **Adafruit Absolute Orientation 9-DOF IMU (BNO055)**
+Both units use RFM9x LoRa FeatherWings stacked directly on their respective Feather M4s, operating at 433 MHz for bidirectional communication.
 
-  * Provides:
+```
+[Nosecone]                        [Rover]
+Feather M4                        Feather M4
+  + RFM9x FeatherWing  <──LoRa──>   + RFM9x FeatherWing
+  + ICM-20948 (I2C)                 + ICM-20948 (I2C)
+  + MPL3115A2 (I2C)                 + MPL3115A2 (I2C)
+                                    + BNO055 (I2C)
+                                    + PCA9685 (I2C)
+                                         ├── Motor 0: Orientation
+                                         ├── Motor 1: Drive Left
+                                         └── Motor 2: Drive Right
+```
 
-    * Orientation (Euler/quaternion)
-    * Acceleration
-    * Gyroscope data
-    * Magnetometer readings
+---
+
+## Flight Logic Overview
+
+### Nosecone
+
+Uses a Kalman filter fusing ICM-20948 accelerometer data with MPL3115A2 barometric altitude to drive a state machine:
+
+```
+IDLE → LAUNCHED → ASCENDING → APOGEE → DESCENDING → LANDED
+```
+
+Each state transition requires multiple consecutive confirmations to reject noise-triggered false positives.
+
+### Rover
+
+Runs an identical flight detection stack. On landing confirmation:
+
+1. Drive motors stop
+2. BNO055 orientation is read
+3. PID controller drives the orientation motor to level the payload (Y axis vertical)
+4. Motor stops once level is held within tolerance
+5. Post-landing rover logic executes (TBD)
 
 ---
 
 ## Hardware Layout
 
-### Raspberry Pi Connections
+### Feather M4 Connections (Both Units)
 
-* SPI → RFM9x FeatherWing
-* I2C → BNO055 IMU
-* Power distribution bus
+| Interface | Connected To |
+|---|---|
+| FeatherWing (stacked) | RFM9x LoRa radio |
+| I2C (SDA/SCL) | ICM-20948, MPL3115A2 |
+| I2C (SDA/SCL) | BNO055, PCA9685 *(Rover only)* |
+| PWM (via PCA9685) | Motor ESCs *(Rover only)* |
 
-### Feather M4 Connections
+### I2C Address Reference
 
-* RFM9x FeatherWing (stacked)
-* PWM outputs → Motor ESCs
+| Device | Default I2C Address |
+|---|---|
+| ICM-20948 | 0x69 |
+| MPL3115A2 | 0x60 |
+| BNO055 | 0x28 |
+| PCA9685 | 0x40 |
 
-### Communication Flow
-
-```
-IMU → Raspberry Pi → LoRa (RFM9x)
-                 ↕
-         Feather M4 + RFM9x
-                 ↓
-              Motors
-```
-
-The Pi and Feather communicate over LoRa to allow command relay and redundancy.
+> ⚠️ Verify no address conflicts before powering both units. Use `i2cdetect` during bench testing.
 
 ---
 
-## Features
+## Motor Configuration (Rover)
 
-* 📡 Long-range LoRa telemetry (433 MHz)
-* 🧭 Absolute orientation tracking
-* ⚙️ Independent microcontroller for deterministic control
-* 🔁 Dual-radio architecture for redundancy
-* 🚀 Designed for CyLaunch/NASA SLI payload constraints
+| Channel | Motor | Function |
+|---|---|---|
+| PCA9685 Ch 0 | Bigfoot25 | Orientation (rotate payload to level) |
+| PCA9685 Ch 1 | Bigfoot25 | Drive wheel left |
+| PCA9685 Ch 2 | Bigfoot25 | Drive wheel right |
 
----
-
-## Software Stack
-
-### Raspberry Pi
-
-* Python 3
-* CircuitPython libraries
-* SPI + I2C interfaces
-* Adafruit RFM9x Library
-* Adafruit BNO055 Library
-
-### Feather M4
-
-* CircuitPython firmware
-* PWM motor control scripts
-* LoRa communication handler
-
----
-
-## Dependencies
-
-Install on Raspberry Pi:
-
-```bash
-pip install adafruit-circuitpython-rfm9x
-pip install adafruit-circuitpython-bno055
-pip install adafruit-blinka
-```
-
-Enable interfaces:
-
-```bash
-sudo raspi-config
-# Enable SPI
-# Enable I2C
-```
-
----
-
-## Wiring Summary
-
-### IMU (BNO055 → Raspberry Pi)
-
-* VIN → 3.3V
-* GND → GND
-* SDA → SDA
-* SCL → SCL
-
-### RFM9x (Pi Side)
-
-* SCK → SPI SCLK
-* MOSI → SPI MOSI
-* MISO → SPI MISO
-* CS → GPIO8 (example)
-* RST → GPIO25 (example)
-* G0 (IRQ) → GPIO24
-
-### Feather M4 + FeatherWing
-
-* FeatherWing stacks directly onto Feather M4
-* No external wiring required for radio
-
-### Motors
-
-* ESC Signal → Feather M4 PWM pin
-* External power supply required
-* Common ground between ESCs and Feather
+**ESC Protocol:** Standard hobby PWM (1000–2000µs), 50 Hz
 
 ---
 
 ## Power Requirements
 
-⚠️ **Important**
+> ⚠️ **Motors must use a dedicated power source. Do NOT power motors from the Feather 3.3V or 5V rail.**
 
-* Motors must use a dedicated power source.
-* Do NOT power motors from Raspberry Pi or Feather 5V rail.
-* All grounds must be shared across systems.
-
-Recommended architecture:
+All grounds must be shared across systems.
 
 ```
-Battery → ESC Power
-        → 5V Regulator → Raspberry Pi
-        → Feather M4 USB/BAT input
+Battery Pack
+  ├── ESC Power rails (motor voltage)
+  ├── 5V Regulator → Feather M4 (USB/BAT input)
+  └── Common GND across all boards
+```
+
+---
+
+## Software Stack
+
+Both units run **CircuitPython** on the Feather M4 Express.
+
+### Nosecone
+
+* `adafruit_icm20x` — ICM-20948 IMU driver
+* `adafruit_mpl3115a2` — Altimeter driver
+* `adafruit_rfm9x` — LoRa radio
+* Custom Kalman filter + flight state machine
+
+### Rover
+
+* `adafruit_icm20x` — ICM-20948 IMU driver
+* `adafruit_mpl3115a2` — Altimeter driver
+* `adafruit_bno055` — Absolute orientation
+* `adafruit_pca9685` — PWM motor driver
+* `adafruit_rfm9x` — LoRa radio
+* Custom Kalman filter + flight state machine + PID orientation controller
+
+### Dependencies
+
+```bash
+circup install adafruit_icm20x adafruit_mpl3115a2 adafruit_bno055 adafruit_pca9685 adafruit_rfm9x
 ```
 
 ---
@@ -188,19 +178,21 @@ TODO
 
 ## Flight Safety Notes
 
-* Verify Li-Ion battery storage compliance.
-* Secure all connectors against vibration.
-* Use strain relief for SPI/I2C wiring.
-* Confirm LoRa frequencies comply with launch regulations.
+* Verify Li-Ion battery storage and transport compliance with launch range rules.
+* Secure all connectors and FeatherWing stacks against vibration before flight.
+* Use strain relief on all I2C wiring runs.
+* Confirm 433 MHz LoRa operation complies with launch range RF regulations.
+* Perform ESC arming sequence verification on the bench before integration.
 
 ---
 
 ## Future Improvements
 
-* Hardware watchdog between Pi and Feather
-* Redundant IMU integration
-* Custom PCB replacing breadboard prototype
-* CAN/UART backup communication channel
+* Hardware watchdog between nosecone and rover units
+* Redundant IMU integration on nosecone
+* Custom PCB replacing breadboard/FeatherWing prototype
+* UART or CAN backup communication channel
+* Rover drive logic (post-landing locomotion)
 
 ---
 
@@ -208,4 +200,3 @@ TODO
 
 CyLaunch 2026 Payload Team
 * Noah Wons
-

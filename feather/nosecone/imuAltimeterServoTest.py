@@ -3,22 +3,22 @@ import math
 import board
 import adafruit_icm20x
 import adafruit_mpl3115a2
-# import pwmio
-# from adafruit_motor import servo
+import pwmio
+from adafruit_motor import servo
 
 # ============================================================
 # SERVO TEST (commented out)
 # ============================================================
-# SERVO_PIN = board.D5
-# pwm = pwmio.PWMOut(SERVO_PIN, duty_cycle=0, frequency=50)
-# my_servo = servo.Servo(pwm, min_pulse=500, max_pulse=2500)
-#
-# def test_servo():
-#     print("Servo test starting...")
-#     for angle in range(0, 45, 2):
-#         my_servo.angle = angle
-#         time.sleep(0.05)
-#     time.sleep(0.5)
+SERVO_PIN = board.D5
+pwm = pwmio.PWMOut(SERVO_PIN, duty_cycle=0, frequency=50)
+my_servo = servo.Servo(pwm, min_pulse=500, max_pulse=2500)
+
+def test_servo():
+    print("Servo test starting...")
+    for angle in range(0, 45, 2):
+        my_servo.angle = angle
+        time.sleep(0.05)
+    time.sleep(0.5)
 # ============================================================
 
 DT = 0.1  # 10 Hz output rate
