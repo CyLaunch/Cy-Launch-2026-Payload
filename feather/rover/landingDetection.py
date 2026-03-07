@@ -1,3 +1,12 @@
+# ======================================================================================
+# Developer: Noah Wons
+# Program: Testing ICM-20948 IMU and MPL3115A2 altimeter on FeatherWing M4 Express
+#          Uses a Kalman filter to fuse accel and barometer data for robust altitude/velocity estimates
+#          Detects launch, apogee, and landing events with confirmation logic to avoid false triggers.
+# NOTE: This test script has not been tested with our motors (TACON BIGFOOT25) or PWM driver
+# Contact: wons123@iastate.edu
+# ======================================================================================
+
 import time
 import board
 import adafruit_mpl3115a2

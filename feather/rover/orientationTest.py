@@ -1,3 +1,11 @@
+# ======================================================================================
+# Developer: Noah Wons
+# Program: Test script for PWM motor control using PCA9685 on FeatherWing M4 Express
+#          Includes a calibration routine for ESCs and a simple test sequence to verify motor response.
+#          NOTE: This test script has NOT been tested with our motors (TACON BIGFOOT25) and PWM driver.
+# Contact: wons123@iastate.edu
+# ======================================================================================
+
 import time
 import board
 import adafruit_bno055

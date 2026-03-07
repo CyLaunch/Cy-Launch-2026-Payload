@@ -1,3 +1,9 @@
+# ======================================================================================
+# Developer: Noah Wons
+# Program: Testing ICM-20948 IMU and MPL3115A2 altimeter on FeatherWing M4 Express
+# Contact: wons123@iastate.edu
+# ======================================================================================
+
 import time
 import math
 import board
