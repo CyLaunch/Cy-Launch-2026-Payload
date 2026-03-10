@@ -1,105 +1,108 @@
 # ======================================================================================
 # Developer: Noah Wons
-# Program: Test script for PWM motor control using PCA9685 on FeatherWing M4 Express
-#          Includes a calibration routine for ESCs and a simple test sequence to verify motor response.
-#          NOTE: This test script has NOT been tested with our motors (TACON BIGFOOT25) and PWM driver.
+# Program: Test script for orientation-based motor control using BNO055 IMU and PCA9685 on FeatherWing M4 Express
+# Additional Notes:
+# - This script reads the roll angle from the BNO055 IMU and uses it to control a single motor for leveling.
+# - The motor will attempt to correct any tilt by running in the appropriate direction and speed proportional to the angle of tilt.
+# - A dead zone is implemented to prevent constant small corrections when the system is nearly level.
+# - Tuning parameters (KP, MAX_SPEED, MIN_SPEED) may need adjustment based on your specific motor and mechanical setup.
+# - NOTE: Ensure the orientation motor is on PWM channels 0 and 1.
+# 
 # Contact: wons123@iastate.edu
 # ======================================================================================
 
 import time
 import board
-import adafruit_bno055
+import busio
 from adafruit_pca9685 import PCA9685
+import adafruit_bno055
 
-# ==============================================================================
-# CONFIGURATION — adjust these to match your setup
-# ==============================================================================
+# --- Setup I2C, PCA9685, and BNO055 ---
+i2c = busio.I2C(board.SCL, board.SDA)
+pca = PCA9685(i2c)
+pca.frequency = 1000  # 1kHz PWM for motor drivers
+bno = adafruit_bno055.BNO055_I2C(i2c)
 
-MOTOR_ORIENTATION   = 0       # PCA9685 channel for orientation motor
+# --- Motor 1 (Leveling) is on CH0 (PWM1) and CH1 (PWM2) ---
+MOTOR_PWM1 = 0
+MOTOR_PWM2 = 1
 
-PWM_FREQ            = 50      # Hz
-PWM_MIN             = 204     # 1000µs — stop
-PWM_MAX             = 409     # 2000µs — full speed
-PWM_MID             = 307     # 1500µs — neutral
+# --- Tuning Parameters ---
+LEVEL_THRESHOLD = 2.0    # degrees — if tilt is within this range, do nothing (dead zone)
+MAX_SPEED = 60           # max motor speed % (keep below 100 to avoid violent corrections)
+MIN_SPEED = 15           # min speed % to overcome motor stiction
+KP = 1.5                 # proportional gain — increase if corrections are too slow,
+                         # decrease if motor overshoots/oscillates
 
-PID_KP              = 2.0     # Start here, tune up if sluggish
-PID_KI              = 0.0     # Add small value if steady-state offset persists
-PID_KD              = 0.5     # Increase if oscillating
+# --- Motor Control ---
+def set_motor(speed):
+    """
+    speed: -100 to 100
+    positive = forward, negative = reverse, 0 = stop
+    """
+    speed = max(-100, min(100, speed))  # clamp to safe range
+    duty = int(abs(speed) / 100 * 65535)
+    if speed > 0:
+        pca.channels[MOTOR_PWM1].duty_cycle = duty
+        pca.channels[MOTOR_PWM2].duty_cycle = 0
+    elif speed < 0:
+        pca.channels[MOTOR_PWM1].duty_cycle = 0
+        pca.channels[MOTOR_PWM2].duty_cycle = duty
+    else:
+        pca.channels[MOTOR_PWM1].duty_cycle = 0
+        pca.channels[MOTOR_PWM2].duty_cycle = 0
 
-CORRECT_EULER_INDEX = 1       # 1=roll, 2=pitch — confirm on bench by tilting
-LEVEL_TOLERANCE_DEG = 2.0     # Degrees considered "level" (motor stops)
-DT                  = 0.05    # 20 Hz control loop
+def stop_motor():
+    set_motor(0)
 
-# ==============================================================================
-# HELPERS
-# ==============================================================================
+# --- Wait for BNO055 to calibrate ---
+print("Waiting for BNO055 to be ready...")
+time.sleep(1)
 
-def set_motor_pwm(pca, channel, pwm_counts):
-    pwm_counts = max(PWM_MIN, min(PWM_MAX, int(pwm_counts)))
-    pca.channels[channel].duty_cycle = int(pwm_counts / 4096 * 65535)
-
-def stop_motor(pca, channel):
-    set_motor_pwm(pca, channel, PWM_MIN)
-
-def arm_esc(pca):
-    set_motor_pwm(pca, MOTOR_ORIENTATION, PWM_MIN)
-    time.sleep(2.0)
-
-def wait_for_calibration(bno):
-    while True:
-        sys, gyro, accel, mag = bno.calibration_status
-        if sys >= 1 and gyro >= 1:
-            break
-        time.sleep(0.5)
-
-# ==============================================================================
-# PID
-# ==============================================================================
-
-class PID:
-    def __init__(self, kp, ki, kd, dt):
-        self.kp, self.ki, self.kd, self.dt = kp, ki, kd, dt
-        self._integral   = 0.0
-        self._prev_error = 0.0
-
-    def compute(self, current_angle):
-        error             = 0.0 - current_angle
-        self._integral    = max(-50.0, min(50.0, self._integral + error * self.dt))
-        derivative        = (error - self._prev_error) / self.dt
-        self._prev_error  = error
-        output            = self.kp * error + self.ki * self._integral + self.kd * derivative
-        return max(PWM_MIN, min(PWM_MAX, PWM_MID + output))
-
-# ==============================================================================
-# MAIN
-# ==============================================================================
-
-i2c        = board.I2C()
-bno        = adafruit_bno055.BNO055_I2C(i2c)
-pca        = PCA9685(i2c)
-pca.frequency = PWM_FREQ
-pid        = PID(PID_KP, PID_KI, PID_KD, DT)
-
-arm_esc(pca)
-wait_for_calibration(bno)
+print("Starting leveling loop. Press CTRL+C to stop.")
+print(f"Dead zone: +/- {LEVEL_THRESHOLD} degrees")
+print(f"Max speed: {MAX_SPEED}%")
+print()
 
 try:
     while True:
+        # Read Euler angles from BNO055
+        # euler returns (heading, roll, pitch) in degrees
         euler = bno.euler
-        if euler is None or euler[CORRECT_EULER_INDEX] is None:
-            stop_motor(pca, MOTOR_ORIENTATION)
-            time.sleep(DT)
+
+        if euler is None or euler[1] is None:
+            print("No IMU data — check wiring!")
+            stop_motor()
+            time.sleep(0.5)
             continue
 
-        angle = euler[CORRECT_EULER_INDEX]
+        heading, roll, pitch = euler
 
-        if abs(angle) <= LEVEL_TOLERANCE_DEG:
-            stop_motor(pca, MOTOR_ORIENTATION)
+        # Use ROLL to determine tilt (side-to-side leveling)
+        # Swap to 'pitch' if your motor corrects front-to-back tilt instead
+        tilt = roll
+
+        # --- Proportional Control ---
+        if abs(tilt) <= LEVEL_THRESHOLD:
+            # Within dead zone — hold still
+            stop_motor()
+            status = "LEVEL"
+            speed_out = 0
         else:
-            set_motor_pwm(pca, MOTOR_ORIENTATION, pid.compute(angle))
+            # Calculate correction speed proportional to tilt angle
+            raw_speed = KP * tilt
+            # Enforce minimum speed so motor actually moves
+            if raw_speed > 0:
+                speed_out = max(MIN_SPEED, min(MAX_SPEED, raw_speed))
+            else:
+                speed_out = min(-MIN_SPEED, max(-MAX_SPEED, raw_speed))
 
-        time.sleep(DT)
+            set_motor(speed_out)
+            status = "CORRECTING"
+
+        print(f"Tilt: {tilt:+.1f} deg | Speed: {speed_out:+.0f}% | Status: {status}")
+        time.sleep(0.05)  # 20Hz control loop
 
 except KeyboardInterrupt:
-    stop_motor(pca, MOTOR_ORIENTATION)
-    pca.deinit()
+    print("\nStopped by user.")
+    stop_motor()
