@@ -28,6 +28,9 @@ class FlightDetector:
         self.state = FlightState.IDLE
         self.ground_alt = None
 
+        self.LAUNCH_ALT_THRESHOLD = 50.0  # Ensure we don't trigger on false positive
+        self.LANDED_ALT_THRESHOLD = 20.0
+
         # Kalman filter state
         self.kf_altitude = 0.0
         self.kf_velocity = 0.0
@@ -121,7 +124,7 @@ class FlightDetector:
         prev_state = self.state
 
         if self.state == FlightState.IDLE:
-            if altitude > 5.0 and velocity > 5.0:
+            if altitude > self.LAUNCH_ALT_THRESHOLD and velocity > 5.0:
                 self.confirm_count += 1
                 if self.confirm_count >= self.CONFIRM_THRESHOLD:
                     self.state = FlightState.LAUNCHED
@@ -145,7 +148,7 @@ class FlightDetector:
             self.state = FlightState.DESCENDING
 
         elif self.state == FlightState.DESCENDING:
-            if altitude < 10.0 and abs(velocity) < 0.5:
+            if altitude < self.LANDED_ALT_THRESHOLD and abs(velocity) < 0.5:
                 self.confirm_count += 1
                 if self.confirm_count >= self.CONFIRM_THRESHOLD:
                     self.state = FlightState.LANDED
