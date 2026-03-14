@@ -3,18 +3,48 @@
 # Program: Landing detection state machine using ICM-20948 IMU and MPL3115A2 altimeter on FeatherWing M4 Express
 #          Uses a Kalman filter to fuse accel and barometer data for robust altitude/velocity estimates
 #          Detects launch, apogee, and landing events with confirmation logic to avoid false triggers.
+#          Set TEST_MODE = True to run servo and sensor diagnostics instead of the flight state machine.
 # Contact: wons123@iastate.edu
 # ======================================================================================
 
 import time
 import math
 import board
+import pwmio
 import adafruit_mpl3115a2
 import adafruit_icm20x
 from adafruit_motor import servo
 
+# ======================================================================================
+# GLOBAL CONFIGURATION
+# Set TEST_MODE = True  → runs servo + sensor diagnostics
+# Set TEST_MODE = False → runs the full flight state machine
+# ======================================================================================
+TEST_MODE = True
 
-# --- State Machine ---
+LOG_FILE = "flight_log.txt"  # Output file for flight events
+
+
+# ======================================================================================
+# Logging helper — writes timestamped events to LOG_FILE
+# ======================================================================================
+def log_event(event, altitude=None, velocity=None):
+    timestamp = time.monotonic()
+    if altitude is not None and velocity is not None:
+        line = f"[{timestamp:.3f}s] {event} | Alt: {altitude:.2f}m AGL | Vel: {velocity:.3f}m/s\n"
+    else:
+        line = f"[{timestamp:.3f}s] {event}\n"
+    print(line, end="")
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(line)
+    except Exception as e:
+        print(f"[LOG ERROR] Could not write to {LOG_FILE}: {e}")
+
+
+# ======================================================================================
+# State Machine
+# ======================================================================================
 class FlightState:
     IDLE = "IDLE"
     LAUNCHED = "LAUNCHED"
@@ -157,46 +187,164 @@ class FlightDetector:
                 self.confirm_count = 0
 
         if self.state != prev_state:
-            print(f"[{time.monotonic():.2f}s] {prev_state} → {self.state} "
-                  f"| Alt: {altitude:.1f}m AGL | Vel: {velocity:.2f}m/s")
+            log_event(f"STATE: {prev_state} → {self.state}", altitude, velocity)
 
         return self.state, altitude, velocity
 
 
-# --- Setup ---
+# ======================================================================================
+# Hardware Setup (shared by both modes)
+# ======================================================================================
+def mag3(x, y, z):
+    return math.sqrt(x * x + y * y + z * z)
+
 i2c = board.I2C()
 
-altimeter = adafruit_mpl3115a2.MPL3115A2(i2c)
-altimeter.sealevel_pressure = 101325  # Set to your local pressure in Pascals
+# --- Altimeter ---
+print("Initializing MPL3115A2 altimeter...")
+altimeter = None
+try:
+    altimeter = adafruit_mpl3115a2.MPL3115A2(i2c)
+    altimeter.sealevel_pressure = 101325  # Set to your local pressure in Pascals
+    print("  OK MPL3115A2 found")
+except Exception as e:
+    print(f"  ERROR MPL3115A2 not detected: {e}")
 
-# ICM-20948: 9-DOF (accel + gyro + magnetometer)
-imu = adafruit_icm20x.ICM20948(i2c)
+# --- IMU ---
+print("Initializing ICM-20948 IMU...")
+imu = None
+for addr in (0x69, 0x68):
+    try:
+        imu = adafruit_icm20x.ICM20948(i2c, address=addr)
+        print(f"  OK ICM-20948 found at 0x{addr:02X}")
+        break
+    except Exception as e:
+        print(f"  ERROR Not at 0x{addr:02X}: {e}")
 
+if imu is None:
+    print("ERROR: ICM-20948 not detected. Check wiring.")
+
+# --- Servo ---
 SERVO_PIN = board.D5
 pwm = pwmio.PWMOut(SERVO_PIN, duty_cycle=0, frequency=50)
 my_servo = servo.Servo(pwm, min_pulse=500, max_pulse=2500)
 
-detector = FlightDetector()
 
-print("Calibrating... keep the vehicle still.")
-detector.calibrate(altimeter, imu)
-print("Ready. Waiting for launch...\n")
+# ======================================================================================
+# TEST MODE
+# ======================================================================================
+def run_test_mode():
+    print("\n=== TEST MODE ===")
+    print("Running servo and sensor diagnostics.\n")
 
-# --- Main Loop ---
-while True:
-    baro_alt = altimeter.altitude
-    state, altitude, velocity = detector.update(imu, baro_alt)
+    # --- Servo test ---
+    print("--- Servo Test ---")
+    print("Sweeping servo 0 → 45 degrees...")
+    for angle in range(0, 46, 2):
+        my_servo.angle = angle
+        time.sleep(0.05)
+    time.sleep(0.5)
+    print("Sweeping servo 45 → 0 degrees...")
+    for angle in range(45, -1, -2):
+        my_servo.angle = angle
+        time.sleep(0.05)
+    print("Servo test complete.\n")
 
-    # Optional: print telemetry every loop for debugging
-    ax, ay, az = imu.acceleration
-    print(f"State: {state:12s} | AGL: {altitude:6.1f}m | Vel: {velocity:6.2f}m/s "
-          f"| Accel Z: {az - detector.gravity_z:5.2f}m/s²")
+    # --- Sensor test ---
+    print("--- Sensor Test (10 Hz for 5 seconds) ---")
+    DT = 0.1
+    print(
+        f"{'ALT(m)':>8} {'P(hPa)':>8} {'T(C)':>6} | "
+        f"{'Ax':>6} {'Ay':>6} {'Az':>6} | "
+        f"{'Gx':>6} {'Gy':>6} {'Gz':>6} | "
+        f"{'|a|':>6} {'|g|':>6}"
+    )
+    print("=" * 80)
 
-    if state == FlightState.LANDED:
-        print("\nLanding confirmed. Rotating servo to retract nosecone pins...")
-        my_servo.angle = 0  # Adjust the angle as needed
-        for angle in range(0, 45, 2):
-            my_servo.angle = angle
-            time.sleep(0.05)
+    end_time = time.monotonic() + 5.0
+    while time.monotonic() < end_time:
+        if altimeter is not None:
+            try:
+                alt  = altimeter.altitude
+                pres = altimeter.pressure / 100  # Pa -> hPa
+                temp = altimeter.temperature
+            except Exception as e:
+                alt, pres, temp = float('nan'), float('nan'), float('nan')
+                print(f"Altimeter read error: {e}")
+        else:
+            alt, pres, temp = float('nan'), float('nan'), float('nan')
 
-    time.sleep(detector.dt)
+        if imu is not None:
+            try:
+                ax, ay, az = imu.acceleration
+                gx, gy, gz = imu.gyro
+                a_mag = mag3(ax, ay, az)
+                g_mag = mag3(gx, gy, gz)
+            except Exception as e:
+                ax = ay = az = gx = gy = gz = a_mag = g_mag = float('nan')
+                print(f"IMU read error: {e}")
+        else:
+            ax = ay = az = gx = gy = gz = a_mag = g_mag = float('nan')
+
+        print(
+            f"{alt:8.2f} {pres:8.2f} {temp:6.2f} | "
+            f"{ax:6.2f} {ay:6.2f} {az:6.2f} | "
+            f"{gx:6.3f} {gy:6.3f} {gz:6.3f} | "
+            f"{a_mag:6.2f} {g_mag:6.3f}"
+        )
+        time.sleep(DT)
+
+    print("\nSensor test complete.")
+    print("=== TEST MODE DONE ===\n")
+
+
+# ======================================================================================
+# FLIGHT MODE
+# ======================================================================================
+def run_flight_mode():
+    if altimeter is None or imu is None:
+        print("ERROR: Required sensors missing. Cannot run flight mode.")
+        return
+
+    detector = FlightDetector()
+
+    log_event("BOOT: Flight computer started")
+    print("Calibrating... keep the vehicle still.")
+    detector.calibrate(altimeter, imu)
+    log_event(f"CALIBRATION: ground_alt={detector.ground_alt:.2f}m gravity_z={detector.gravity_z:.3f}m/s^2")
+    print("Ready. Waiting for launch...\n")
+
+    apogee_logged = False
+
+    while True:
+        baro_alt = altimeter.altitude
+        state, altitude, velocity = detector.update(imu, baro_alt)
+
+        ax, ay, az = imu.acceleration
+        print(f"State: {state:12s} | AGL: {altitude:6.1f}m | Vel: {velocity:6.2f}m/s "
+              f"| Accel Z: {az - detector.gravity_z:5.2f}m/s^2")
+
+        # Log apogee once when we first enter that state
+        if state == FlightState.APOGEE and not apogee_logged:
+            log_event("EVENT: APOGEE REACHED", altitude, velocity)
+            apogee_logged = True
+
+        if state == FlightState.LANDED:
+            log_event("EVENT: LANDING CONFIRMED", altitude, velocity)
+            print("\nLanding confirmed. Rotating servo to retract nosecone pins...")
+            for angle in range(0, 45, 2):
+                my_servo.angle = angle
+                time.sleep(0.05)
+            log_event("EVENT: SERVO DEPLOYMENT COMPLETE")
+            break  # Stop looping after landing
+
+        time.sleep(detector.dt)
+
+
+# ======================================================================================
+# Entry Point
+# ======================================================================================
+if TEST_MODE:
+    run_test_mode()
+else:
+    run_flight_mode()
