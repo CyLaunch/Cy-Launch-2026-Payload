@@ -1,198 +1,149 @@
-# 🚀 CyLaunch 2026 Payload Device
+# CyLaunch 2026 Payload
 
 ## Overview
 
-The **CyLaunch 2026 Payload Device** is a hybrid avionics and telemetry system designed for high-reliability data collection and motor actuation during rocket flight operations. The system is split across two subsystems — the **Nosecone** and the **Rover (Payload)** — each built around an Adafruit Feather M4 Express with a stacked RFM9x LoRa FeatherWing for communication.
+The **CyLaunch 2026 Payload** is a two-system avionics package designed for a high-power rocket with an expected apogee of approximately 4800 ft. The payload consists of a **Nosecone System** that detects flight events and deploys the rover, and a **Rover System** that performs autonomous soil collection after landing.
 
-This system supports:
-
-* Real-time telemetry transmission
-* Flight detection (launch, apogee, landing) via sensor fusion
-* Absolute orientation sensing
-* Remote command capability
-* Multi-motor actuation
-* Redundant communication pathways
+Both systems run **CircuitPython** on an Adafruit Feather M4 Express.
 
 ---
 
-## System Architecture
+## System 1 — Nosecone
 
-The system is composed of two independent but communicating units:
+### Purpose
 
-### Nosecone Unit
+Detects launch and landing events, then actuates a servo to release the rover from the nosecone on landing confirmation.
 
-Responsible for flight detection (launch, apogee, landing) and telemetry relay.
+### Hardware
 
 | Component | Role |
 |---|---|
 | Adafruit Feather M4 Express | Main microcontroller |
-| RFM9x LoRa FeatherWing (433 MHz) | Wireless telemetry (stacked) |
-| Adafruit ICM-20948 9-DOF IMU | Accelerometer / gyro for flight detection |
+| Adafruit ICM-20948 9-DOF IMU | Accelerometer / gyro / magnetometer |
 | Adafruit MPL3115A2 Altimeter | Barometric altitude |
+| Servo (D5) | Nosecone pin retraction on landing |
+| 5V 5200mAh battery | System power |
 
-### Rover (Payload) Unit
+### Flight Detection Logic
 
-Responsible for post-landing orientation, drive motor control, and sensor acquisition.
+Launch and landing are detected using a threshold-based state machine — no Kalman filter is required given the ~4800ft apogee, which provides a 30:1 signal-to-noise margin over the 50m detection threshold.
+
+**State machine:** `IDLE → LAUNCHED → LANDED`
+
+**Launch detection (`IDLE → LAUNCHED`):**
+- Requires 5 consecutive readings where:
+  - IMU acceleration magnitude > 20 m/s² (motor ignition signature, ~2G)
+  - Altimeter AGL > 50m (confirms vehicle is airborne, not just bumped on the pad)
+- A 10-second lockout after launch prevents landing from being evaluated during boost
+
+**Landing detection (`LAUNCHED → LANDED`):**
+- Requires 10 consecutive readings where:
+  - Altimeter AGL < 50m
+  - Standard deviation of IMU acceleration magnitude < 0.5 m/s² (vehicle is stationary)
+- On confirmation: servo rotates to retract nosecone pins and release the rover
+
+**Calibration (run at startup, vehicle stationary):**
+- Averages raw pressure readings to derive local sea-level pressure, correcting for weather and launch site elevation
+- Sets altimeter ground baseline so all altitude readings are AGL
+- IMU gravity offset on the Z axis is measured and removed from acceleration readings
+
+### Scripts
+
+| File | Description |
+|---|---|
+| `feather/nosecone/simpleFlightDetection.py` | Primary flight detection script |
+| `feather/nosecone/landingDetection.py` | Earlier Kalman filter-based flight detection (reference) |
+| `feather/nosecone/imuAltimeterServoTest.py` | Bench diagnostic — servo sweep + sensor readout |
+
+---
+
+## System 2 — Rover
+
+### Purpose
+
+Deployed from the nosecone after landing. Autonomously navigates to a soil collection site, collects a sample, and returns.
+
+### Hardware
 
 | Component | Role |
 |---|---|
 | Adafruit Feather M4 Express | Main microcontroller |
-| RFM9x LoRa FeatherWing (433 MHz) | Wireless telemetry (stacked) |
-| Adafruit ICM-20948 9-DOF IMU | Accelerometer / gyro for flight detection |
-| Adafruit MPL3115A2 Altimeter | Barometric altitude |
-| Adafruit BNO055 Absolute Orientation IMU | Post-landing orientation correction |
-| Adafruit PCA9685 16-Channel PWM Driver | ESC/motor control via I2C |
-| 3× Bigfoot25 Brushless Motors + ESCs | 1× orientation, 2× drive wheels |
+| Adafruit ICM-20948 9-DOF IMU | Accelerometer / gyro / magnetometer (flight detection) |
+| Adafruit MPL3115A2 Altimeter | Barometric altitude (flight detection) |
+| Adafruit BNO055 Absolute Orientation IMU | Heading / orientation for motor 3 rotation control |
+| Adafruit PCA9685 PWM Driver | Supplies PWM signals to all DC motors via I2C |
+| DC Motor 1 — Drive (encoder) | Primary locomotion |
+| DC Motor 2 — Soil Collection (encoder) | Soil collection mechanism |
+| DC Motor 3 — Rotation (no encoder) | Rover rotation, controlled via BNO055 heading |
 
----
+### Motor Configuration
 
-## Communication Architecture
+| Motor | Encoder | Control Basis | Function |
+|---|---|---|---|
+| Drive | Yes | Encoder RPM | Forward/reverse locomotion, obstacle navigation |
+| Soil Collection | Yes | Encoder RPM / voltage | Soil collection mechanism |
+| Rotation | No | BNO055 heading | Rotates rover to correct heading |
 
-Both units use RFM9x LoRa FeatherWings stacked directly on their respective Feather M4s, operating at 433 MHz for bidirectional communication.
+The two encoder-equipped motors allow RPM measurement for obstacle navigation and voltage requirement tuning. The rotation motor uses BNO055 absolute orientation data to determine how far and in which direction to rotate.
 
-```
-[Nosecone]                        [Rover]
-Feather M4                        Feather M4
-  + RFM9x FeatherWing  <──LoRa──>   + RFM9x FeatherWing
-  + ICM-20948 (I2C)                 + ICM-20948 (I2C)
-  + MPL3115A2 (I2C)                 + MPL3115A2 (I2C)
-                                    + BNO055 (I2C)
-                                    + PCA9685 (I2C)
-                                         ├── Motor 0: Orientation
-                                         ├── Motor 1: Drive Left
-                                         └── Motor 2: Drive Right
-```
+### Flight Detection
 
----
+The rover runs a landing detection script closely mirroring the nosecone's `simpleFlightDetection.py`, using the same ICM-20948 + MPL3115A2 hardware stack and the same launch/landing logic. The only modification is that on landing confirmation, the rover executes the soil collection algorithm rather than actuating a servo.
 
-## Flight Logic Overview
+### Scripts
 
-### Nosecone
-
-Uses a Kalman filter fusing ICM-20948 accelerometer data with MPL3115A2 barometric altitude to drive a state machine:
-
-```
-IDLE → LAUNCHED → ASCENDING → APOGEE → DESCENDING → LANDED
-```
-
-Each state transition requires multiple consecutive confirmations to reject noise-triggered false positives.
-
-### Rover
-
-Runs an identical flight detection stack. On landing confirmation:
-
-1. Drive motors stop
-2. BNO055 orientation is read
-3. PID controller drives the orientation motor to level the payload (Y axis vertical)
-4. Motor stops once level is held within tolerance
-5. Post-landing rover logic executes (TBD)
-
----
-
-## Hardware Layout
-
-### Feather M4 Connections (Both Units)
-
-| Interface | Connected To |
+| File | Description |
 |---|---|
-| FeatherWing (stacked) | RFM9x LoRa radio |
-| I2C (SDA/SCL) | ICM-20948, MPL3115A2 |
-| I2C (SDA/SCL) | BNO055, PCA9685 *(Rover only)* |
-| PWM (via PCA9685) | Motor ESCs *(Rover only)* |
-
-### I2C Address Reference
-
-| Device | Default I2C Address |
-|---|---|
-| ICM-20948 | 0x69 |
-| MPL3115A2 | 0x60 |
-| BNO055 | 0x28 |
-| PCA9685 | 0x40 |
-
-> ⚠️ Verify no address conflicts before powering both units. Use `i2cdetect` during bench testing.
-
----
-
-## Motor Configuration (Rover)
-
-| Channel | Motor | Function |
-|---|---|---|
-| PCA9685 Ch 0 | Bigfoot25 | Orientation (rotate payload to level) |
-| PCA9685 Ch 1 | Bigfoot25 | Drive wheel left |
-| PCA9685 Ch 2 | Bigfoot25 | Drive wheel right |
-
-**ESC Protocol:** Standard hobby PWM (1000–2000µs), 50 Hz
-
----
-
-## Power Requirements
-
-> ⚠️ **Motors must use a dedicated power source. Do NOT power motors from the Feather 3.3V or 5V rail.**
-
-All grounds must be shared across systems.
-
-```
-Battery Pack
-  ├── ESC Power rails (motor voltage)
-  ├── 5V Regulator → Feather M4 (USB/BAT input)
-  └── Common GND across all boards
-```
-
----
-
-## Software Stack
-
-Both units run **CircuitPython** on the Feather M4 Express.
-
-### Nosecone
-
-* `adafruit_icm20x` — ICM-20948 IMU driver
-* `adafruit_mpl3115a2` — Altimeter driver
-* `adafruit_rfm9x` — LoRa radio
-* Custom Kalman filter + flight state machine
-
-### Rover
-
-* `adafruit_icm20x` — ICM-20948 IMU driver
-* `adafruit_mpl3115a2` — Altimeter driver
-* `adafruit_bno055` — Absolute orientation
-* `adafruit_pca9685` — PWM motor driver
-* `adafruit_rfm9x` — LoRa radio
-* Custom Kalman filter + flight state machine + PID orientation controller
-
-### Dependencies
-
-```bash
-circup install adafruit_icm20x adafruit_mpl3115a2 adafruit_bno055 adafruit_pca9685 adafruit_rfm9x
-```
+| `feather/rover/landingDetection.py` | Kalman filter-based flight detection (reference) |
+| `feather/rover/DCMotorTest.py` | Basic DC motor actuation test |
+| `feather/rover/DCMotorEncoderTest.py` | Motor RPM measurement via encoder |
+| `feather/rover/motorTest.py` | ESC calibration and motor test sequence |
+| `feather/rover/orientationTest.py` | BNO055 orientation-driven motor control test |
 
 ---
 
 ## Repository Structure
 
 ```
-TODO
+Cy-Launch-2026-Payload/
+├── feather/
+│   ├── nosecone/
+│   │   ├── simpleFlightDetection.py     # Primary nosecone flight script
+│   │   ├── landingDetection.py          # Kalman-based flight detection (reference)
+│   │   └── imuAltimeterServoTest.py     # Bench diagnostic
+│   ├── rover/
+│   │   ├── landingDetection.py          # Rover flight detection
+│   │   ├── DCMotorTest.py               # DC motor test
+│   │   ├── DCMotorEncoderTest.py        # Encoder RPM test
+│   │   ├── motorTest.py                 # ESC calibration
+│   │   └── orientationTest.py           # BNO055 orientation test
+│   └── feather_libraries/
+│       └── lib/                         # CircuitPython libraries (.mpy)
+└── py/
+    └── testing/                         # Host-side Python test scripts
+        ├── imuTesting/
+        ├── lightSensorTesting/
+        ├── motorTesting/
+        ├── soilProbeTesting/
+        └── transmissionTesting/
 ```
 
 ---
 
-## Flight Safety Notes
+## I2C Address Reference
 
-* Verify Li-Ion battery storage and transport compliance with launch range rules.
-* Secure all connectors and FeatherWing stacks against vibration before flight.
-* Use strain relief on all I2C wiring runs.
-* Confirm 433 MHz LoRa operation complies with launch range RF regulations.
-* Perform ESC arming sequence verification on the bench before integration.
+| Device | Default Address |
+|---|---|
+| ICM-20948 | 0x69 (alt: 0x68) |
+| MPL3115A2 | 0x60 |
+| BNO055 | 0x28 |
+| PCA9685 | 0x40 |
 
 ---
 
-## Future Improvements
+## Power
 
-* Hardware watchdog between nosecone and rover units
-* Redundant IMU integration on nosecone
-* Custom PCB replacing breadboard/FeatherWing prototype
-* UART or CAN backup communication channel
-* Rover drive logic (post-landing locomotion)
+The nosecone system is powered by a dedicated 5V 5200mAh battery. Motor power on the rover must use a dedicated supply — do not draw motor current from the Feather's 3.3V or 5V rails. All grounds must be shared.
 
 ---
 
