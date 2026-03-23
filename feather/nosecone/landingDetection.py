@@ -78,23 +78,46 @@ class FlightDetector:
         self.gravity_z = 9.81  # will be refined during calibrate()
 
     def calibrate(self, altimeter, imu, num_samples=50):
-        """Record ground-level altitude baseline and measure gravity on this IMU's Z axis."""
+        """Record ground-level altitude baseline, local sea-level pressure, and measure gravity on this IMU's Z axis."""
         alt_readings = []
         gz_readings = []
+        pres_readings = []
 
         for _ in range(num_samples):
             alt_readings.append(altimeter.altitude)
+            pres_readings.append(altimeter.pressure)
             az = imu.acceleration[2]  # Z-axis accel while stationary
             gz_readings.append(az)
             time.sleep(0.02)
 
+        # Derive local sea-level pressure from ground-level pressure reading.
+        # This corrects for day-to-day weather and launch site elevation,
+        # replacing the hardcoded standard atmosphere value.
+        local_pressure = sum(pres_readings) / len(pres_readings)
+        altimeter.sealevel_pressure = local_pressure
+
+        # Re-sample altitude now that sealevel_pressure is corrected.
+        # The previous alt_readings were computed with the old (standard) pressure,
+        # so we take a quick fresh average to get an accurate ground_alt baseline.
+        alt_readings = [altimeter.altitude for _ in range(10)]
+
         self.ground_alt = sum(alt_readings) / len(alt_readings)
+
+        # Compute barometer measurement noise (R) from the variance of the re-sampled
+        # altitude readings. The rocket is stationary here, so all variation is sensor
+        # noise. This replaces the hardcoded R = 2.0 with a value measured on this
+        # specific unit under current environmental conditions.
+        mean_alt = self.ground_alt
+        self.R = sum((a - mean_alt) ** 2 for a in alt_readings) / len(alt_readings)
+        self.R = max(self.R, 0.01)  # Floor to avoid R=0 if sensor reads perfectly flat
 
         # The mean Z accel while stationary = gravity on that axis.
         # This handles the IMU being mounted upside-down or tilted slightly.
         self.gravity_z = sum(gz_readings) / len(gz_readings)
 
-        print(f"Ground altitude: {self.ground_alt:.2f} m")
+        print(f"Local pressure:    {local_pressure:.2f} Pa")
+        print(f"Ground altitude:   {self.ground_alt:.2f} m")
+        print(f"Barometer noise R: {self.R:.4f} m^2")
         print(f"Gravity on Z axis: {self.gravity_z:.3f} m/s^2")
 
     def get_vertical_accel(self, imu):
@@ -205,7 +228,6 @@ print("Initializing MPL3115A2 altimeter...")
 altimeter = None
 try:
     altimeter = adafruit_mpl3115a2.MPL3115A2(i2c)
-    altimeter.sealevel_pressure = 101325  # Set to your local pressure in Pascals
     print("  OK MPL3115A2 found")
 except Exception as e:
     print(f"  ERROR MPL3115A2 not detected: {e}")
