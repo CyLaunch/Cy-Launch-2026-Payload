@@ -120,7 +120,7 @@ Cy-Launch-2026-Payload/
 │   └── feather_libraries/
 │       └── lib/                         # CircuitPython libraries (.mpy)
 └── py/
-    └── testing/                         # Host-side Python test scripts
+    └── testing/                         # Old test scripts for raspi 3b flight computer
         ├── imuTesting/
         ├── lightSensorTesting/
         ├── motorTesting/
