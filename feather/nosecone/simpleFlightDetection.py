@@ -1,9 +1,12 @@
 # ======================================================================================
 # Developer: Noah Wons
-# Program: Simplified landing detection using MPL3115A2 altimeter on FeatherWing M4 Express.
-#          Detects launch and landing via altitude threshold with confirmation logic.
-#          At ~4800ft apogee, a 50m threshold provides a 30:1 signal-to-noise margin,
-#          making a Kalman filter unnecessary for this use case.
+# Program: Simplified landing detection using MPL3115A2 altimeter and ICM-20948 IMU
+#          on FeatherWing M4 Express.
+#          Launch is detected via IMU acceleration threshold (motor ignition signature),
+#          confirmed by altimeter reading above 50m AGL. Landing is detected once the
+#          altimeter drops back below 50m AGL, with a 10-second post-launch lockout to
+#          prevent false triggers during boost. At ~4800ft apogee this approach is
+#          reliable without requiring a Kalman filter.
 #          Set TEST_MODE = True to run servo and sensor diagnostics instead of flight mode.
 # Contact: wons123@iastate.edu
 # ======================================================================================
@@ -25,11 +28,13 @@ TEST_MODE = True
 
 LOG_FILE = "flight_log.txt"
 
-LAUNCH_ALT_THRESHOLD = 50.0   # meters AGL — above this = launched
-LANDED_ALT_THRESHOLD = 50.0   # meters AGL — below this (after launch) = landed
+LAUNCH_ACCEL_THRESHOLD = 20.0  # m/s² total — above this indicates motor ignition (~2G)
+LAUNCH_ALT_THRESHOLD   = 50.0  # meters AGL — altimeter must confirm we are airborne
+LANDED_ALT_THRESHOLD   = 50.0  # meters AGL — below this (after lockout) = landed
+LANDING_LOCKOUT        = 10.0  # seconds after launch before landing is evaluated
 
-LAUNCH_CONFIRM = 5    # consecutive readings above threshold to confirm launch
-LANDED_CONFIRM = 10   # consecutive readings below threshold to confirm landing
+LAUNCH_CONFIRM = 5    # consecutive readings above accel threshold (+ alt check) to confirm launch
+LANDED_CONFIRM = 10   # consecutive readings below alt threshold to confirm landing
 
 LOOP_DT = 0.05        # 20 Hz
 
@@ -68,6 +73,7 @@ class FlightDetector:
         self.state         = FlightState.IDLE
         self.ground_alt    = None
         self.confirm_count = 0
+        self.launch_time   = None  # monotonic timestamp set at launch confirmation
 
     def calibrate(self, altimeter, num_samples=50):
         """
@@ -96,26 +102,35 @@ class FlightDetector:
     def get_agl(self, altimeter):
         return altimeter.altitude - self.ground_alt
 
-    def update(self, agl):
+    def update(self, agl, accel_mag):
         prev_state = self.state
 
         if self.state == FlightState.IDLE:
-            if agl > LAUNCH_ALT_THRESHOLD:
+            # Require sustained high acceleration AND altimeter confirmation above 50m.
+            # High accel catches ignition fast; alt check prevents false triggers from
+            # pad handling or accidental bumps.
+            if accel_mag > LAUNCH_ACCEL_THRESHOLD and agl > LAUNCH_ALT_THRESHOLD:
                 self.confirm_count += 1
                 if self.confirm_count >= LAUNCH_CONFIRM:
                     self.state = FlightState.LAUNCHED
+                    self.launch_time = time.monotonic()
                     self.confirm_count = 0
             else:
                 self.confirm_count = 0
 
         elif self.state == FlightState.LAUNCHED:
-            if agl < LANDED_ALT_THRESHOLD:
-                self.confirm_count += 1
-                if self.confirm_count >= LANDED_CONFIRM:
-                    self.state = FlightState.LANDED
+            # Do not evaluate landing until LANDING_LOCKOUT seconds have elapsed.
+            # This prevents any transient low-altitude readings during boost from
+            # triggering a false landing event.
+            elapsed = time.monotonic() - self.launch_time
+            if elapsed >= LANDING_LOCKOUT:
+                if agl < LANDED_ALT_THRESHOLD:
+                    self.confirm_count += 1
+                    if self.confirm_count >= LANDED_CONFIRM:
+                        self.state = FlightState.LANDED
+                        self.confirm_count = 0
+                else:
                     self.confirm_count = 0
-            else:
-                self.confirm_count = 0
 
         if self.state != prev_state:
             log_event(f"STATE: {prev_state} -> {self.state}", agl)
@@ -141,7 +156,7 @@ try:
 except Exception as e:
     print(f"  ERROR MPL3115A2 not detected: {e}")
 
-# --- IMU (used only in test mode) ---
+# --- IMU (required for launch detection) ---
 print("Initializing ICM-20948 IMU...")
 imu = None
 for addr in (0x69, 0x68):
@@ -153,7 +168,7 @@ for addr in (0x69, 0x68):
         print(f"  ERROR Not at 0x{addr:02X}: {e}")
 
 if imu is None:
-    print("  WARNING: ICM-20948 not detected. IMU unavailable (not needed for flight mode).")
+    print("  ERROR: ICM-20948 not detected. Check wiring.")
 
 # --- Servo ---
 SERVO_PIN = board.D5
@@ -233,8 +248,8 @@ def run_test_mode():
 # FLIGHT MODE
 # ======================================================================================
 def run_flight_mode():
-    if altimeter is None:
-        print("ERROR: Altimeter missing. Cannot run flight mode.")
+    if altimeter is None or imu is None:
+        print("ERROR: Required sensors missing. Cannot run flight mode.")
         return
 
     detector = FlightDetector()
@@ -246,10 +261,12 @@ def run_flight_mode():
     print("Ready. Waiting for launch...\n")
 
     while True:
-        agl   = detector.get_agl(altimeter)
-        state = detector.update(agl)
+        agl       = detector.get_agl(altimeter)
+        ax, ay, az = imu.acceleration
+        accel_mag = mag3(ax, ay, az)
+        state     = detector.update(agl, accel_mag)
 
-        print(f"State: {state:10s} | AGL: {agl:6.1f}m")
+        print(f"State: {state:10s} | AGL: {agl:6.1f}m | Accel: {accel_mag:5.1f}m/s²")
 
         if state == FlightState.LANDED:
             log_event("EVENT: LANDING CONFIRMED", agl)
