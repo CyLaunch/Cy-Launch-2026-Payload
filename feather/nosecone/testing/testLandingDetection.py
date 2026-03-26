@@ -248,3 +248,14 @@ while True:
 
     last_instruction_state = state
     time.sleep(LOOP_DT)
+
+
+# Proposed addition to httpie/output/formatters/__init__.py
+from abc import ABC, abstractmethod
+
+class BaseFormatter(ABC):
+    @abstractmethod
+    def format_headers(self, headers: str) -> str: ...
+    
+    @abstractmethod
+    def format_body(self, content: str, mime: str) -> str: ...
