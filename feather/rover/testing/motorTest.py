@@ -2,25 +2,15 @@
 # Developer: Noah Wons
 # Program: All-motor test — brushed ESC (motor 1) + two TB9051FTG H-bridge motors (2 & 3)
 # Wiring:
-#   Motor 1 (ESC):      PWM signal → D5  | Encoder A → D6,  B → D7
-#   Motor 2 (H-bridge): PCA9685 CH0/CH1  | Encoder A → D11, B → D12
-#   Motor 3 (H-bridge): PCA9685 CH2/CH3  | Encoder A → D9,  B → D10
+#   Motor 1 (ESC):      PWM signal → D5  | Encoder A → D11, B → D12
+#   Motor 2 (H-bridge): PCA9685 CH0/CH1  | No encoder        | OCC → D13
+#   Motor 3 (H-bridge): PCA9685 CH2/CH3  | Encoder A → D9, B → D10 | OCC → D6
 #
 #   TB9051FTG wiring: CH_fwd > 0, CH_rev = 0 → forward
 #                     CH_fwd = 0, CH_rev > 0 → reverse
 #                     CH_fwd = 0, CH_rev = 0 → stop
+#                     OCC pin is active LOW (reads False when overcurrent detected)
 #
-#   Assumed wiring:                                                                                                                                                                                                          
-                                                                                                                                                                                                                         
-#   ┌───────────────┬─────────────────┬───────┬───────┐                                                                                                                                                                      
-#   │     Motor     │     Control     │ Enc A │ Enc B │                                                                                                                                                                    
-#   ├───────────────┼─────────────────┼───────┼───────┤                                                                                                                                                                      
-#   │ M1 (ESC)      │ D5 (50Hz PWM)   │ D6    │ D7    │                                                                                                                                                                    
-#   ├───────────────┼─────────────────┼───────┼───────┤                                                                                                                                                                    
-#   │ M2 (H-bridge) │ PCA9685 CH0/CH1 │ D11   │ D12   │                                                                                                                                                                      
-#   ├───────────────┼─────────────────┼───────┼───────┤                                                                                                                                                                      
-#   │ M3 (H-bridge) │ PCA9685 CH2/CH3 │ D9    │ D10   │                                                                                                                                                                      
-#   └───────────────┴─────────────────┴───────┴───────┘
 # Contact: wons123@iastate.edu
 # ======================================================================================
 
@@ -117,16 +107,32 @@ class ESCMotor:
 
 class HBridgeMotor:
     """TB9051FTG motor controlled via two PCA9685 channels (forward + reverse).
-    Encoder uses countio for reliable edge counting."""
+    Encoder is optional (pass enc_a_pin=None to disable).
+    OCC pin reads active-low overcurrent signal from the TB9051FTG."""
 
-    def __init__(self, fwd_ch, rev_ch, enc_a_pin, enc_b_pin):
+    def __init__(self, fwd_ch, rev_ch, occ_pin, enc_a_pin=None, enc_b_pin=None):
         self.fwd_ch = fwd_ch
         self.rev_ch = rev_ch
-        self.enc_a = countio.Counter(enc_a_pin, edge=countio.Edge.RISE)
-        self.enc_b = digitalio.DigitalInOut(enc_b_pin)
-        self.enc_b.direction = digitalio.Direction.INPUT
+
+        self.occ = digitalio.DigitalInOut(occ_pin)
+        self.occ.direction = digitalio.Direction.INPUT
+        self.occ.pull = digitalio.Pull.UP
+
+        if enc_a_pin is not None:
+            self.enc_a = countio.Counter(enc_a_pin, edge=countio.Edge.RISE)
+            self.enc_b = digitalio.DigitalInOut(enc_b_pin)
+            self.enc_b.direction = digitalio.Direction.INPUT
+        else:
+            self.enc_a = None
+            self.enc_b = None
+
         self._last_count = 0
         self._last_time = time.monotonic()
+
+    @property
+    def overcurrent(self):
+        """True when the TB9051FTG reports an overcurrent condition (OCC active low)."""
+        return not self.occ.value
 
     def set_speed(self, speed):
         """speed: -100 to 100. Positive = forward, negative = reverse, 0 = stop."""
@@ -146,7 +152,9 @@ class HBridgeMotor:
         self.set_speed(0)
 
     def read_rpm(self):
-        """Returns signed output shaft RPM since last call, or None if < 50ms elapsed."""
+        """Returns signed output shaft RPM since last call, or None if no encoder / < 50ms elapsed."""
+        if self.enc_a is None:
+            return None
         now = time.monotonic()
         dt = now - self._last_time
         if dt < 0.05:
@@ -164,9 +172,9 @@ class HBridgeMotor:
 # Motor Initialization
 # =============================================================================
 
-motor1 = ESCMotor(pwm_pin=board.D5, enc_a_pin=board.D6, enc_b_pin=board.D7)
-motor2 = HBridgeMotor(fwd_ch=0, rev_ch=1, enc_a_pin=board.D11, enc_b_pin=board.D12)
-motor3 = HBridgeMotor(fwd_ch=2, rev_ch=3, enc_a_pin=board.D9,  enc_b_pin=board.D10)
+motor1 = ESCMotor(pwm_pin=board.D5, enc_a_pin=board.D11, enc_b_pin=board.D12)
+motor2 = HBridgeMotor(fwd_ch=0, rev_ch=1, occ_pin=board.D13)                               # no encoder
+motor3 = HBridgeMotor(fwd_ch=2, rev_ch=3, occ_pin=board.D6, enc_a_pin=board.D9, enc_b_pin=board.D10)
 
 
 # =============================================================================
@@ -181,13 +189,11 @@ def stop_all():
 def reset_encoders():
     motor1.encoder_count = 0
     motor1._last_count = 0
-    motor2.enc_a.reset()
-    motor2._last_count = 0
     motor3.enc_a.reset()
     motor3._last_count = 0
 
 def run_all(duration_s):
-    """Run for duration_s seconds, printing RPM for all motors every 0.5s.
+    """Run for duration_s seconds, printing RPM + OCC for all motors every 0.5s.
     Polls the ESC encoder at ~100Hz throughout."""
     end = time.monotonic() + duration_s
     last_print = time.monotonic()
@@ -195,18 +201,20 @@ def run_all(duration_s):
         motor1.poll_encoder()
         now = time.monotonic()
         if now - last_print >= 0.5:
-            _print_rpm()
+            _print_status()
             last_print = now
         time.sleep(0.01)
 
-def _print_rpm():
+def _print_status():
     rpm1 = motor1.read_rpm()
-    rpm2 = motor2.read_rpm()
+    rpm2 = motor2.read_rpm()   # always None (no encoder)
     rpm3 = motor3.read_rpm()
     r1 = f"{rpm1:6.1f}" if rpm1 is not None else "   ---"
-    r2 = f"{rpm2:+6.1f}" if rpm2 is not None else "   ---"
+    r2 = f"{rpm2:+6.1f}" if rpm2 is not None else "   N/A"
     r3 = f"{rpm3:+6.1f}" if rpm3 is not None else "   ---"
-    print(f"  M1(ESC):{r1} RPM  |  M2:{r2} RPM  |  M3:{r3} RPM")
+    occ2 = "OCC!" if motor2.overcurrent else "OK"
+    occ3 = "OCC!" if motor3.overcurrent else "OK"
+    print(f"  M1(ESC):{r1} RPM  |  M2:{r2} RPM OCC:{occ2}  |  M3:{r3} RPM OCC:{occ3}")
 
 
 # =============================================================================
@@ -267,12 +275,12 @@ try:
         motor3.set_speed(spd)
         motor1.poll_encoder()
         rpm1 = motor1.read_rpm()
-        rpm2 = motor2.read_rpm()
         rpm3 = motor3.read_rpm()
         r1 = f"{rpm1:6.1f}" if rpm1 is not None else "  ---"
-        r2 = f"{rpm2:+6.1f}" if rpm2 is not None else "  ---"
         r3 = f"{rpm3:+6.1f}" if rpm3 is not None else "  ---"
-        print(f"  M1:{pulse}us  M2/M3:{spd:2d}%  |  RPM  M1:{r1}  M2:{r2}  M3:{r3}")
+        occ2 = "OCC!" if motor2.overcurrent else "OK"
+        occ3 = "OCC!" if motor3.overcurrent else "OK"
+        print(f"  M1:{pulse}us  M2/M3:{spd:2d}%  |  RPM M1:{r1}  M3:{r3}  |  OCC M2:{occ2} M3:{occ3}")
         time.sleep(0.2)
     run_all(1)
 
@@ -287,12 +295,12 @@ try:
         motor3.set_speed(spd)
         motor1.poll_encoder()
         rpm1 = motor1.read_rpm()
-        rpm2 = motor2.read_rpm()
         rpm3 = motor3.read_rpm()
         r1 = f"{rpm1:6.1f}" if rpm1 is not None else "  ---"
-        r2 = f"{rpm2:+6.1f}" if rpm2 is not None else "  ---"
         r3 = f"{rpm3:+6.1f}" if rpm3 is not None else "  ---"
-        print(f"  M1:{pulse}us  M2/M3:{spd:2d}%  |  RPM  M1:{r1}  M2:{r2}  M3:{r3}")
+        occ2 = "OCC!" if motor2.overcurrent else "OK"
+        occ3 = "OCC!" if motor3.overcurrent else "OK"
+        print(f"  M1:{pulse}us  M2/M3:{spd:2d}%  |  RPM M1:{r1}  M3:{r3}  |  OCC M2:{occ2} M3:{occ3}")
         time.sleep(0.2)
 
     print("\nTest complete.")

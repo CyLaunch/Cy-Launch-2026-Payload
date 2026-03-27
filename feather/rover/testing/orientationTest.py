@@ -6,7 +6,7 @@
 # - The motor will attempt to correct any tilt by running in the appropriate direction and speed proportional to the angle of tilt.
 # - A dead zone is implemented to prevent constant small corrections when the system is nearly level.
 # - Tuning parameters (KP, MAX_SPEED, MIN_SPEED) may need adjustment based on your specific motor and mechanical setup.
-# - NOTE: Ensure the orientation motor is on PWM channels 0 and 1.
+# - NOTE: Orientation motor is on PWM channels 2 and 3. Encoder A on D9, B on D10.
 # 
 # Contact: wons123@iastate.edu
 # ======================================================================================
@@ -14,6 +14,8 @@
 import time
 import board
 import busio
+import countio
+import digitalio
 from adafruit_pca9685 import PCA9685
 import adafruit_bno055
 
@@ -23,9 +25,14 @@ pca = PCA9685(i2c)
 pca.frequency = 1000  # 1kHz PWM for motor drivers
 bno = adafruit_bno055.BNO055_I2C(i2c)
 
-# --- Motor 1 (Leveling) is on CH0 (PWM1) and CH1 (PWM2) ---
-MOTOR_PWM1 = 0
-MOTOR_PWM2 = 1
+# --- Orientation motor is on CH2 (forward) and CH3 (reverse) ---
+MOTOR_PWM1 = 2
+MOTOR_PWM2 = 3
+
+# --- Encoder (D9 = A, D10 = B) ---
+enc_a = countio.Counter(board.D9, edge=countio.Edge.RISE)
+enc_b = digitalio.DigitalInOut(board.D10)
+enc_b.direction = digitalio.Direction.INPUT
 
 # --- Tuning Parameters ---
 LEVEL_THRESHOLD = 2.0    # degrees — if tilt is within this range, do nothing (dead zone)
@@ -100,7 +107,8 @@ try:
             set_motor(speed_out)
             status = "CORRECTING"
 
-        print(f"Tilt: {tilt:+.1f} deg | Speed: {speed_out:+.0f}% | Status: {status}")
+        direction = 1 if enc_b.value else -1
+        print(f"Tilt: {tilt:+.1f} deg | Speed: {speed_out:+.0f}% | Enc: {enc_a.count * direction} | Status: {status}")
         time.sleep(0.05)  # 20Hz control loop
 
 except KeyboardInterrupt:
