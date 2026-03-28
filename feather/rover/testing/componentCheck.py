@@ -4,7 +4,6 @@
 #          and returning valid data before a full test run.
 # Components:
 #   - BNO055      Absolute orientation IMU     (0x28 or 0x29)
-#   - ICM-20948   9-DOF accel/gyro/mag IMU     (0x68 or 0x69)
 #   - MPL3115A2   Altimeter                    (0x60)
 #   - PCA9685     PWM driver                   (0x40)
 #
@@ -13,7 +12,6 @@
 
 import board
 import adafruit_bno055
-import adafruit_icm20x
 import adafruit_mpl3115a2
 from adafruit_pca9685 import PCA9685
 
@@ -43,8 +41,7 @@ if found_addrs:
 else:
     print("  WARNING: No I2C devices found — check SDA/SCL wiring and power.")
 
-EXPECTED = {0x28: "BNO055", 0x29: "BNO055", 0x68: "ICM-20948",
-            0x69: "ICM-20948", 0x60: "MPL3115A2", 0x40: "PCA9685"}
+EXPECTED = {0x28: "BNO055", 0x29: "BNO055", 0x60: "MPL3115A2", 0x40: "PCA9685"}
 
 for addr in EXPECTED:
     if addr in found_addrs:
@@ -81,36 +78,6 @@ if bno is not None:
 else:
     print("  ERROR: BNO055 not detected")
     results["BNO055"] = FAIL
-
-# =============================================================================
-# ICM-20948 — 9-DOF Accel / Gyro / Magnetometer
-# =============================================================================
-
-print("\n[ ICM-20948 — 9-DOF IMU ]")
-icm = None
-for addr in (0x69, 0x68):
-    try:
-        icm = adafruit_icm20x.ICM20948(i2c, address=addr)
-        print(f"  Init OK at 0x{addr:02X}")
-        break
-    except Exception as e:
-        print(f"  Not at 0x{addr:02X}: {e}")
-
-if icm is not None:
-    try:
-        ax, ay, az = icm.acceleration   # m/s^2
-        gx, gy, gz = icm.gyro           # rad/s
-        mx, my, mz = icm.magnetic       # uT
-        print(f"  Accel  ax={ax:.2f}  ay={ay:.2f}  az={az:.2f} m/s^2")
-        print(f"  Gyro   gx={gx:.3f}  gy={gy:.3f}  gz={gz:.3f} rad/s")
-        print(f"  Mag    mx={mx:.3f}  my={my:.3f}  mz={mz:.3f} uT")
-        results["ICM-20948"] = PASS
-    except Exception as e:
-        print(f"  Read error: {e}")
-        results["ICM-20948"] = FAIL
-else:
-    print("  ERROR: ICM-20948 not detected")
-    results["ICM-20948"] = FAIL
 
 # =============================================================================
 # MPL3115A2 — Altimeter

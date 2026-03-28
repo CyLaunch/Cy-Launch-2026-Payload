@@ -45,15 +45,15 @@ Launch and landing are detected using a threshold-based state machine — no Kal
 **Calibration (run at startup, vehicle stationary):**
 - Averages raw pressure readings to derive local sea-level pressure, correcting for weather and launch site elevation
 - Sets altimeter ground baseline so all altitude readings are AGL
-- IMU gravity offset on the Z axis is measured and removed from acceleration readings
 
 ### Scripts
 
 | File | Description |
 |---|---|
-| `feather/nosecone/simpleFlightDetection.py` | Primary flight detection script |
+| `feather/nosecone/flightDetection.py` | Primary flight detection script |
 | `feather/nosecone/landingDetection.py` | Earlier Kalman filter-based flight detection (reference) |
-| `feather/nosecone/imuAltimeterServoTest.py` | Bench diagnostic — servo sweep + sensor readout |
+| `feather/nosecone/testing/imuAltimeterServoTest.py` | Bench diagnostic — servo sweep + sensor readout |
+| `feather/nosecone/testing/testLandingDetection.py` | Landing detection bench test |
 
 ---
 
@@ -68,37 +68,47 @@ Deployed from the nosecone after landing. Autonomously navigates to a soil colle
 | Component | Role |
 |---|---|
 | Adafruit Feather M4 Express | Main microcontroller |
-| Adafruit ICM-20948 9-DOF IMU | Accelerometer / gyro / magnetometer (flight detection) |
+| Adafruit BNO055 Absolute Orientation IMU | Accelerometer / gyro / orientation (flight detection + leveling) |
 | Adafruit MPL3115A2 Altimeter | Barometric altitude (flight detection) |
-| Adafruit BNO055 Absolute Orientation IMU | Heading / orientation for motor 3 rotation control |
-| Adafruit PCA9685 PWM Driver | Supplies PWM signals to all DC motors via I2C |
-| DC Motor 1 — Drive (encoder) | Primary locomotion |
-| DC Motor 2 — Soil Collection (encoder) | Soil collection mechanism |
-| DC Motor 3 — Rotation (no encoder) | Rover rotation, controlled via BNO055 heading |
+| Adafruit PCA9685 PWM Driver | Supplies PWM signals to H-bridge motors via I2C |
+| Motor 1 — Drive, brushed ESC (encoder A=D11, B=D12) | Primary locomotion |
+| Motor 2 — Soil Collection, TB9051FTG H-bridge CH0/CH1 (no encoder, OCC=D13) | Soil collection mechanism |
+| Motor 3 — Orientation, TB9051FTG H-bridge CH2/CH3 (encoder A=D9, B=D10, OCC=D6) | Rover leveling, controlled via BNO055 roll |
 
 ### Motor Configuration
 
-| Motor | Encoder | Control Basis | Function |
-|---|---|---|---|
-| Drive | Yes | Encoder RPM | Forward/reverse locomotion, obstacle navigation |
-| Soil Collection | Yes | Encoder RPM / voltage | Soil collection mechanism |
-| Rotation | No | BNO055 heading | Rotates rover to correct heading |
+| Motor | Channel | Encoder | OCC Pin | Function |
+|---|---|---|---|---|
+| M1 — Drive (brushed ESC) | D5 PWM | A=D11, B=D12 | — | Forward/reverse locomotion |
+| M2 — Soil Collection (TB9051FTG) | PCA9685 CH0/CH1 | None | D13 | Soil collection mechanism |
+| M3 — Orientation (TB9051FTG) | PCA9685 CH2/CH3 | A=D9, B=D10 | D6 | Levels rover using BNO055 roll |
 
-The two encoder-equipped motors allow RPM measurement for obstacle navigation and voltage requirement tuning. The rotation motor uses BNO055 absolute orientation data to determine how far and in which direction to rotate.
+The BNO055 replaces a dedicated 9-DOF IMU — its onboard sensor fusion provides both raw accelerometer/gyro data for flight detection and fused Euler angles for orientation-based motor control, reducing I2C bus load to two sensors (BNO055 + MPL3115A2).
 
 ### Flight Detection
 
-The rover runs a landing detection script closely mirroring the nosecone's `simpleFlightDetection.py`, using the same ICM-20948 + MPL3115A2 hardware stack and the same launch/landing logic. The only modification is that on landing confirmation, the rover executes the soil collection algorithm rather than actuating a servo.
+`feather/rover/flightDetection.py` mirrors the nosecone state machine using BNO055 acceleration + MPL3115A2 altitude. On landing confirmation, it runs a pre-captured roll offset calibration and drives the orientation motor (M3) to level the rover before beginning autonomous operations.
+
+**Pre-launch calibration sequence:**
+1. Altimeter pressure baseline (50 samples, ~2.5s)
+2. BNO055 roll offset baseline (3s sample, rover on level ground)
 
 ### Scripts
 
 | File | Description |
 |---|---|
-| `feather/rover/landingDetection.py` | Kalman filter-based flight detection (reference) |
-| `feather/rover/DCMotorTest.py` | Basic DC motor actuation test |
-| `feather/rover/DCMotorEncoderTest.py` | Motor RPM measurement via encoder |
-| `feather/rover/motorTest.py` | ESC calibration and motor test sequence |
-| `feather/rover/orientationTest.py` | BNO055 orientation-driven motor control test |
+| `feather/rover/flightDetection.py` | Primary rover flight detection + post-landing leveling |
+| `feather/rover/testing/motorTest.py` | All-motor test — ESC + two H-bridge motors with OCC monitoring |
+| `feather/rover/testing/orientationTest.py` | BNO055-driven orientation motor control with level calibration |
+| `feather/rover/testing/componentCheck.py` | I2C component detection check (BNO055, MPL3115A2, PCA9685) |
+| `feather/rover/testing/brushedESCTest.py` | Single brushed ESC test with encoder RPM |
+| `feather/rover/testing/dualMotorDriveTest.py` | Dual H-bridge motor test with encoder RPM |
+| `feather/rover/testing/singleMotorTest.py` | Single H-bridge motor test |
+| `feather/rover/testing/imuTest.py` | ICM-20948 bench diagnostic (reference) |
+| `feather/rover/testing/DCMotorTest.py` | Basic DC motor actuation test |
+| `feather/rover/testing/DCMotorEncoderTest.py` | Encoder RPM measurement test |
+| `feather/rover/testing/testSoilTester.py` | 7-in-1 soil sensor RS-485/Modbus readout |
+| `feather/rover/testing/landingDetection.py` | Kalman filter-based flight detection (reference) |
 
 ---
 
@@ -108,19 +118,29 @@ The rover runs a landing detection script closely mirroring the nosecone's `simp
 Cy-Launch-2026-Payload/
 ├── feather/
 │   ├── nosecone/
-│   │   ├── simpleFlightDetection.py     # Primary nosecone flight script
+│   │   ├── flightDetection.py           # Primary nosecone flight script
 │   │   ├── landingDetection.py          # Kalman-based flight detection (reference)
-│   │   └── imuAltimeterServoTest.py     # Bench diagnostic
+│   │   └── testing/
+│   │       ├── imuAltimeterServoTest.py # Bench diagnostic — servo + sensor readout
+│   │       └── testLandingDetection.py  # Landing detection bench test
 │   ├── rover/
-│   │   ├── landingDetection.py          # Rover flight detection
-│   │   ├── DCMotorTest.py               # DC motor test
-│   │   ├── DCMotorEncoderTest.py        # Encoder RPM test
-│   │   ├── motorTest.py                 # ESC calibration
-│   │   └── orientationTest.py           # BNO055 orientation test
+│   │   ├── flightDetection.py           # Primary rover flight detection + leveling
+│   │   └── testing/
+│   │       ├── motorTest.py             # All-motor test (ESC + 2x H-bridge)
+│   │       ├── orientationTest.py       # BNO055 orientation motor control
+│   │       ├── componentCheck.py        # I2C component detection check
+│   │       ├── brushedESCTest.py        # Single brushed ESC test
+│   │       ├── dualMotorDriveTest.py    # Dual H-bridge motor test
+│   │       ├── singleMotorTest.py       # Single motor test
+│   │       ├── imuTest.py               # ICM-20948 bench diagnostic (reference)
+│   │       ├── DCMotorTest.py           # DC motor actuation test
+│   │       ├── DCMotorEncoderTest.py    # Encoder RPM test
+│   │       ├── testSoilTester.py        # Soil sensor RS-485/Modbus readout
+│   │       └── landingDetection.py      # Kalman-based flight detection (reference)
 │   └── feather_libraries/
 │       └── lib/                         # CircuitPython libraries (.mpy)
-└── py/
-    └── testing/                         # Old test scripts for raspi 3b flight computer
+└── pi/
+    └── testing/                         # Old test scripts for Raspberry Pi flight computer
         ├── imuTesting/
         ├── lightSensorTesting/
         ├── motorTesting/
@@ -132,12 +152,14 @@ Cy-Launch-2026-Payload/
 
 ## I2C Address Reference
 
-| Device | Default Address |
-|---|---|
-| ICM-20948 | 0x69 (alt: 0x68) |
-| MPL3115A2 | 0x60 |
-| BNO055 | 0x28 |
-| PCA9685 | 0x40 |
+| Device | Default Address | Used By |
+|---|---|---|
+| ICM-20948 | 0x69 (alt: 0x68) | Nosecone |
+| MPL3115A2 | 0x60 | Nosecone, Rover |
+| BNO055 | 0x28 (alt: 0x29) | Rover |
+| PCA9685 | 0x40 | Rover |
+
+> **Note:** The rover runs only two I2C devices (BNO055 + MPL3115A2 + PCA9685). Each breakout board ships with onboard pull-up resistors — cut the `I2C PU` jumper on all but one board to avoid excessive bus loading.
 
 ---
 

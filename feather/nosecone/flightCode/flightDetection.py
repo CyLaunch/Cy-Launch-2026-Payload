@@ -24,7 +24,6 @@ from adafruit_motor import servo
 # Set TEST_MODE = True  → runs servo + sensor diagnostics
 # Set TEST_MODE = False → runs the full flight state machine
 # ======================================================================================
-TEST_MODE = False
 
 LOG_FILE = "flight_log.txt"
 
@@ -304,7 +303,4 @@ def run_flight_mode():
 # ======================================================================================
 # Entry Point
 # ======================================================================================
-if TEST_MODE:
-    run_test_mode()
-else:
-    run_flight_mode()
+run_flight_mode()
