@@ -11,9 +11,7 @@
 # Contact: wons123@iastate.edu
 # ======================================================================================
 
-import time
 import board
-import busio
 import adafruit_bno055
 import adafruit_icm20x
 import adafruit_mpl3115a2
@@ -28,7 +26,7 @@ results = {}
 # I2C Bus Scan
 # =============================================================================
 
-i2c = busio.I2C(board.SCL, board.SDA)
+i2c = board.I2C()  # uses Feather's built-in SDA/SCL pull-ups
 
 print("=" * 50)
 print("  COMPONENT DETECTION CHECK")

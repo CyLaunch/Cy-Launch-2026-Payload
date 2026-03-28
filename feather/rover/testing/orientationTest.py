@@ -13,14 +13,13 @@
 
 import time
 import board
-import busio
 import countio
 import digitalio
 from adafruit_pca9685 import PCA9685
 import adafruit_bno055
 
 # --- Setup I2C, PCA9685, and BNO055 ---
-i2c = busio.I2C(board.SCL, board.SDA)
+i2c = board.I2C()
 pca = PCA9685(i2c)
 pca.frequency = 1000  # 1kHz PWM for motor drivers
 bno = adafruit_bno055.BNO055_I2C(i2c)
@@ -62,9 +61,44 @@ def set_motor(speed):
 def stop_motor():
     set_motor(0)
 
-# --- Wait for BNO055 to calibrate ---
-print("Waiting for BNO055 to be ready...")
-time.sleep(1)
+# --- Calibration ---
+CALIBRATION_DURATION = 3.0   # seconds to collect level baseline
+CALIBRATION_DT       = 0.05  # 20 Hz sample rate during calibration
+
+def calibrate_level():
+    """
+    Collect roll readings for CALIBRATION_DURATION seconds with the rover
+    sitting level on the ground. Returns the average roll as the zero offset.
+    """
+    print("=" * 45)
+    print("  CALIBRATION")
+    print("  Place the rover on level ground and")
+    print("  keep it still.")
+    print("  Starting in 3 seconds...")
+    print("=" * 45)
+    time.sleep(3)
+
+    samples = []
+    end_time = time.monotonic() + CALIBRATION_DURATION
+    print(f"Collecting {CALIBRATION_DURATION:.0f}s of data...", end="")
+
+    while time.monotonic() < end_time:
+        euler = bno.euler
+        if euler is not None and euler[1] is not None:
+            samples.append(euler[1])  # roll
+        time.sleep(CALIBRATION_DT)
+
+    if not samples:
+        print(" FAILED (no IMU data). Defaulting offset to 0.0")
+        return 0.0
+
+    offset = sum(samples) / len(samples)
+    print(f" done ({len(samples)} samples)")
+    print(f"  Roll offset: {offset:+.2f} deg")
+    print()
+    return offset
+
+roll_offset = calibrate_level()
 
 print("Starting leveling loop. Press CTRL+C to stop.")
 print(f"Dead zone: +/- {LEVEL_THRESHOLD} degrees")
@@ -85,9 +119,9 @@ try:
 
         heading, roll, pitch = euler
 
-        # Use ROLL to determine tilt (side-to-side leveling)
+        # Subtract calibrated offset so tilt = 0 when rover is at its ground-level position
         # Swap to 'pitch' if your motor corrects front-to-back tilt instead
-        tilt = roll
+        tilt = roll - roll_offset
 
         # --- Proportional Control ---
         if abs(tilt) <= LEVEL_THRESHOLD:

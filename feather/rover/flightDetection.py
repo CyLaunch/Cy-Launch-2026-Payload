@@ -1,30 +1,27 @@
 # ======================================================================================
 # Developer: Noah Wons
-# Program: Simplified landing detection using MPL3115A2 altimeter and ICM-20948 IMU
-#          on FeatherWing M4 Express.
-#          Launch is detected via IMU acceleration threshold (motor ignition signature),
-#          confirmed by altimeter reading above 50m AGL. Landing is detected once the
-#          altimeter drops back below 50m AGL, with a 10-second post-launch lockout to
-#          prevent false triggers during boost. At ~4800ft apogee this approach is
-#          reliable without requiring a Kalman filter.
-#          Set TEST_MODE = True to run servo and sensor diagnostics instead of flight mode.
+# Program: Flight detection for rover deployment using MPL3115A2 altimeter and
+#          BNO055 absolute orientation IMU on FeatherWing M4 Express.
+#          Launch is detected via BNO055 accelerometer threshold (motor ignition
+#          signature), confirmed by altimeter reading above 50m AGL. Landing is
+#          detected once the altimeter drops back below 50m AGL with a 10-second
+#          post-launch lockout to prevent false triggers during boost.
+#          Set TEST_MODE = True to run sensor diagnostics instead of flight mode.
 # Contact: wons123@iastate.edu
 # ======================================================================================
 
 import time
 import math
 import board
-import pwmio
+import countio
+import digitalio
 import adafruit_mpl3115a2
-import adafruit_icm20x
-from adafruit_motor import servo
+import adafruit_bno055
+from adafruit_pca9685 import PCA9685
 
 # ======================================================================================
 # GLOBAL CONFIGURATION
-# Set TEST_MODE = True  → runs servo + sensor diagnostics
-# Set TEST_MODE = False → runs the full flight state machine
 # ======================================================================================
-TEST_MODE = True
 
 LOG_FILE = "flight_log.txt"
 
@@ -176,93 +173,29 @@ try:
 except Exception as e:
     print(f"  ERROR MPL3115A2 not detected: {e}")
 
-# --- IMU (required for launch detection) ---
-print("Initializing ICM-20948 IMU...")
+print("Initializing PCA9685 PWM driver...")
+pca = None
+try:    
+    pca = PCA9685(i2c)
+    pca.frequency = 1000
+    print("  OK PCA9685 found at 0x40")
+except Exception as e:
+    print(f"  ERROR PCA9685 not detected: {e}")
+
+
+# --- BNO055 (absolute orientation IMU — accel + gyro used for flight detection) ---
+print("Initializing BNO055 IMU...")
 imu = None
-for addr in (0x69, 0x68):
+for addr in (0x28, 0x29):
     try:
-        imu = adafruit_icm20x.ICM20948(i2c, address=addr)
-        print(f"  OK ICM-20948 found at 0x{addr:02X}")
+        imu = adafruit_bno055.BNO055_I2C(i2c, address=addr)
+        print(f"  OK BNO055 found at 0x{addr:02X}")
         break
     except Exception as e:
-        print(f"  ERROR Not at 0x{addr:02X}: {e}")
+        print(f"  Not at 0x{addr:02X}: {e}")
 
 if imu is None:
-    print("  ERROR: ICM-20948 not detected. Check wiring.")
-
-# --- Servo ---
-SERVO_PIN = board.D5
-pwm = pwmio.PWMOut(SERVO_PIN, duty_cycle=0, frequency=50)
-my_servo = servo.Servo(pwm, min_pulse=500, max_pulse=2500)
-
-
-# ======================================================================================
-# TEST MODE
-# ======================================================================================
-def run_test_mode():
-    print("\n=== TEST MODE ===")
-    print("Running servo and sensor diagnostics.\n")
-
-    # --- Servo test ---
-    print("--- Servo Test ---")
-    print("Sweeping servo 0 → 45 degrees...")
-    for angle in range(0, 46, 2):
-        my_servo.angle = angle
-        time.sleep(0.05)
-    time.sleep(0.5)
-    print("Sweeping servo 45 → 0 degrees...")
-    for angle in range(45, -1, -2):
-        my_servo.angle = angle
-        time.sleep(0.05)
-    print("Servo test complete.\n")
-
-    # --- Sensor test ---
-    print("--- Sensor Test (10 Hz for 5 seconds) ---")
-    DT = 0.1
-    print(
-        f"{'ALT(m)':>8} {'P(hPa)':>8} {'T(C)':>6} | "
-        f"{'Ax':>6} {'Ay':>6} {'Az':>6} | "
-        f"{'Gx':>6} {'Gy':>6} {'Gz':>6} | "
-        f"{'|a|':>6} {'|g|':>6}"
-    )
-    print("=" * 80)
-
-    end_time = time.monotonic() + 5.0
-    while time.monotonic() < end_time:
-        if altimeter is not None:
-            try:
-                alt  = altimeter.altitude
-                pres = altimeter.pressure / 100  # Pa -> hPa
-                temp = altimeter.temperature
-            except Exception as e:
-                alt, pres, temp = float('nan'), float('nan'), float('nan')
-                print(f"Altimeter read error: {e}")
-        else:
-            alt, pres, temp = float('nan'), float('nan'), float('nan')
-
-        if imu is not None:
-            try:
-                ax, ay, az = imu.acceleration
-                gx, gy, gz = imu.gyro
-                a_mag = mag3(ax, ay, az)
-                g_mag = mag3(gx, gy, gz)
-            except Exception as e:
-                ax = ay = az = gx = gy = gz = a_mag = g_mag = float('nan')
-                print(f"IMU read error: {e}")
-        else:
-            ax = ay = az = gx = gy = gz = a_mag = g_mag = float('nan')
-
-        print(
-            f"{alt:8.2f} {pres:8.2f} {temp:6.2f} | "
-            f"{ax:6.2f} {ay:6.2f} {az:6.2f} | "
-            f"{gx:6.3f} {gy:6.3f} {gz:6.3f} | "
-            f"{a_mag:6.2f} {g_mag:6.3f}"
-        )
-        time.sleep(DT)
-
-    print("\nSensor test complete.")
-    print("=== TEST MODE DONE ===\n")
-
+    print("  ERROR: BNO055 not detected. Check wiring.")
 
 # ======================================================================================
 # FLIGHT MODE
@@ -277,34 +210,166 @@ def run_flight_mode():
     log_event("BOOT: Flight computer started")
     print("Calibrating... keep the vehicle still.")
     detector.calibrate(altimeter)
-    log_event(f"CALIBRATION: ground_alt={detector.ground_alt:.2f}m")
+    roll_offset = calibrate_level()   # capture level baseline before launch
+    log_event(f"CALIBRATION: ground_alt={detector.ground_alt:.2f}m  roll_offset={roll_offset:+.2f}deg")
     print("Ready. Waiting for launch...\n")
 
     while True:
-        agl       = detector.get_agl(altimeter)
-        ax, ay, az = imu.acceleration
-        accel_mag = mag3(ax, ay, az)
-        state     = detector.update(agl, accel_mag)
+        agl            = detector.get_agl(altimeter)
+        ax, ay, az     = imu.acceleration
+        accel_mag      = mag3(ax, ay, az)
+        state          = detector.update(agl, accel_mag)
 
         accel_std = detector._accel_std() if len(detector.accel_window) >= ACCEL_WINDOW else float('nan')
         print(f"State: {state:10s} | AGL: {agl:6.1f}m | Accel: {accel_mag:5.1f}m/s² | StdDev: {accel_std:.3f}m/s²")
 
         if state == FlightState.LANDED:
             log_event("EVENT: LANDING CONFIRMED", agl)
-            print("\nLanding confirmed. Rotating servo to retract nosecone pins...")
-            for angle in range(0, 46, 2):
-                my_servo.angle = angle
-                time.sleep(0.05)
-            log_event("EVENT: SERVO DEPLOYMENT COMPLETE")
+            print("\nLanding confirmed.")
+
+            # TODO: add rover post-landing logic here
+            # e.g. deploy rover, start motors, begin navigation
+
+            set_device_to_level(roll_offset)
+
             break
 
         time.sleep(LOOP_DT)
+
+# ======================================================================================
+# Orientation Motor Setup
+# ======================================================================================
+pca = PCA9685(i2c)
+pca.frequency = 1000  # 1kHz PWM for motor drivers
+
+# --- Orientation motor is on CH2 (forward) and CH3 (reverse) ---
+MOTOR_PWM1 = 2
+MOTOR_PWM2 = 3
+
+# --- Encoder (D9 = A, D10 = B) ---
+enc_a = countio.Counter(board.D9, edge=countio.Edge.RISE)
+enc_b = digitalio.DigitalInOut(board.D10)
+enc_b.direction = digitalio.Direction.INPUT
+
+# --- Tuning Parameters ---
+LEVEL_THRESHOLD = 2.0    # degrees — if tilt is within this range, do nothing (dead zone)
+MAX_SPEED = 60           # max motor speed % (keep below 100 to avoid violent corrections)
+MIN_SPEED = 15           # min speed % to overcome motor stiction
+KP = 1.5                 # proportional gain — increase if corrections are too slow,
+                         # decrease if motor overshoots/oscillates
+
+# --- Motor Control ---
+def set_motor(speed):
+    """
+    speed: -100 to 100
+    positive = forward, negative = reverse, 0 = stop
+    """
+    speed = max(-100, min(100, speed))  # clamp to safe range
+    duty = int(abs(speed) / 100 * 65535)
+    if speed > 0:
+        pca.channels[MOTOR_PWM1].duty_cycle = duty
+        pca.channels[MOTOR_PWM2].duty_cycle = 0
+    elif speed < 0:
+        pca.channels[MOTOR_PWM1].duty_cycle = 0
+        pca.channels[MOTOR_PWM2].duty_cycle = duty
+    else:
+        pca.channels[MOTOR_PWM1].duty_cycle = 0
+        pca.channels[MOTOR_PWM2].duty_cycle = 0
+
+def stop_motor():
+    set_motor(0)
+
+# --- Calibration ---
+CALIBRATION_DURATION = 3.0   # seconds to collect level baseline
+CALIBRATION_DT       = 0.05  # 20 Hz sample rate during calibration
+
+def calibrate_level():
+    """
+    Collect roll readings for CALIBRATION_DURATION seconds with the rover
+    sitting level on the ground. Returns the average roll as the zero offset.
+    """
+    print("=" * 45)
+    print("  CALIBRATION")
+    print("  Place the rover on level ground and")
+    print("  keep it still.")
+    print("  Starting in 3 seconds...")
+    print("=" * 45)
+    time.sleep(3)
+
+    samples = []
+    end_time = time.monotonic() + CALIBRATION_DURATION
+    print(f"Collecting {CALIBRATION_DURATION:.0f}s of data...", end="")
+
+    while time.monotonic() < end_time:
+        euler = imu.euler
+        if euler is not None and euler[1] is not None:
+            samples.append(euler[1])  # roll
+        time.sleep(CALIBRATION_DT)
+
+    if not samples:
+        print(" FAILED (no IMU data). Defaulting offset to 0.0")
+        return 0.0
+
+    offset = sum(samples) / len(samples)
+    print(f" done ({len(samples)} samples)")
+    print(f"  Roll offset: {offset:+.2f} deg")
+    print()
+    return offset
+
+def set_device_to_level(roll_offset):
+    """
+    Simple proportional controller to drive the motor until the device is level.
+    roll_offset is captured before launch via calibrate_level() so the rover
+    targets the same orientation it had on the ground, not absolute 0 degrees.
+    """
+
+    print("Starting leveling loop. Press CTRL+C to stop.")
+    print(f"Dead zone: +/- {LEVEL_THRESHOLD} degrees")
+    print(f"Max speed: {MAX_SPEED}%")
+    print()
+
+    while True:
+        # Read Euler angles from BNO055
+        # euler returns (heading, roll, pitch) in degrees
+        euler = imu.euler
+
+        if euler is None or euler[1] is None:
+            print("No IMU data — check wiring!")
+            stop_motor()
+            time.sleep(0.5)
+            continue
+
+        heading, roll, pitch = euler
+
+        # Subtract calibrated offset so tilt = 0 when rover is at its ground-level position
+        # Swap to 'pitch' if your motor corrects front-to-back tilt instead
+        tilt = roll - roll_offset
+
+        # --- Proportional Control ---
+        if abs(tilt) <= LEVEL_THRESHOLD:
+            # Within dead zone — hold still
+            stop_motor()
+            status = "LEVEL"
+            speed_out = 0
+            break
+        else:
+            # Calculate correction speed proportional to tilt angle
+            raw_speed = KP * tilt
+            # Enforce minimum speed so motor actually moves
+            if raw_speed > 0:
+                speed_out = max(MIN_SPEED, min(MAX_SPEED, raw_speed))
+            else:
+                speed_out = min(-MIN_SPEED, max(-MAX_SPEED, raw_speed))
+
+            set_motor(speed_out)
+            status = "CORRECTING"
+
+        direction = 1 if enc_b.value else -1
+        print(f"Tilt: {tilt:+.1f} deg | Speed: {speed_out:+.0f}% | Enc: {enc_a.count * direction} | Status: {status}")
+        time.sleep(0.05)  # 20Hz control loop
 
 
 # ======================================================================================
 # Entry Point
 # ======================================================================================
-if TEST_MODE:
-    run_test_mode()
-else:
-    run_flight_mode()
+run_flight_mode()
