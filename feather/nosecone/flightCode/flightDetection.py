@@ -56,6 +56,16 @@ def log_event(event, altitude=None):
     except Exception as e:
         print(f"[LOG ERROR] Could not write to {LOG_FILE}: {e}")
 
+def log_data(line):
+    timestamp = time.monotonic()
+    entry = f"[{timestamp:.3f}s] {line}\n"
+    print(entry, end="")
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(entry)
+    except Exception as e:
+        print(f"[LOG ERROR] Could not write to {LOG_FILE}: {e}")
+
 
 # ======================================================================================
 # Flight States
@@ -193,6 +203,7 @@ if imu is None:
 SERVO_PIN = board.D5
 pwm = pwmio.PWMOut(SERVO_PIN, duty_cycle=0, frequency=50)
 my_servo = servo.Servo(pwm, min_pulse=500, max_pulse=2500)
+my_servo.angle = 45  # hold at deployed position until landing is confirmed, then retract to 0
 
 
 # ======================================================================================
@@ -286,14 +297,12 @@ def run_flight_mode():
         state     = detector.update(agl, accel_mag)
 
         accel_std = detector._accel_std() if len(detector.accel_window) >= ACCEL_WINDOW else float('nan')
-        print(f"State: {state:10s} | AGL: {agl:6.1f}m | Accel: {accel_mag:5.1f}m/s² | StdDev: {accel_std:.3f}m/s²")
+        log_data(f"State: {state:10s} | AGL: {agl:6.1f}m | Accel: {accel_mag:5.1f}m/s² | StdDev: {accel_std:.3f}m/s²")
 
         if state == FlightState.LANDED:
             log_event("EVENT: LANDING CONFIRMED", agl)
-            print("\nLanding confirmed. Rotating servo to retract nosecone pins...")
-            for angle in range(0, 46, 2):
-                my_servo.angle = angle
-                time.sleep(0.05)
+            print("\nLanding confirmed. Rotating servo to 0 degrees...")
+            my_servo.angle = 0
             log_event("EVENT: SERVO DEPLOYMENT COMPLETE")
             break
 
