@@ -54,6 +54,16 @@ def log_event(event, altitude=None):
     except Exception as e:
         print(f"[LOG ERROR] Could not write to {LOG_FILE}: {e}")
 
+def log_data(line):
+    timestamp = time.monotonic()
+    entry = f"[{timestamp:.3f}s] {line}\n"
+    print(entry, end="")
+    try:
+        with open(LOG_FILE, "a") as f:
+            f.write(entry)
+    except Exception as e:
+        print(f"[LOG ERROR] Could not write to {LOG_FILE}: {e}")
+
 
 # ======================================================================================
 # Flight States
@@ -127,6 +137,7 @@ class FlightDetector:
                     self.state = FlightState.LAUNCHED
                     self.launch_time = time.monotonic()
                     self.confirm_count = 0
+                    log_event("EVENT: LAUNCH CONFIRMED", agl)
             else:
                 self.confirm_count = 0
 
@@ -221,7 +232,7 @@ def run_flight_mode():
         state          = detector.update(agl, accel_mag)
 
         accel_std = detector._accel_std() if len(detector.accel_window) >= ACCEL_WINDOW else float('nan')
-        print(f"State: {state:10s} | AGL: {agl:6.1f}m | Accel: {accel_mag:5.1f}m/s² | StdDev: {accel_std:.3f}m/s²")
+        log_data(f"State: {state:10s} | AGL: {agl:6.1f}m | Accel: {accel_mag:5.1f}m/s² | StdDev: {accel_std:.3f}m/s²")
 
         if state == FlightState.LANDED:
             log_event("EVENT: LANDING CONFIRMED", agl)
@@ -243,8 +254,8 @@ pca = PCA9685(i2c)
 pca.frequency = 1000  # 1kHz PWM for motor drivers
 
 # --- Orientation motor is on CH2 (forward) and CH3 (reverse) ---
-MOTOR_PWM1 = 2
-MOTOR_PWM2 = 3
+MOTOR_PWM1 = 0
+MOTOR_PWM2 = 1
 
 # --- Encoder (D9 = A, D10 = B) ---
 enc_a = countio.Counter(board.D9, edge=countio.Edge.RISE)
@@ -252,7 +263,7 @@ enc_b = digitalio.DigitalInOut(board.D10)
 enc_b.direction = digitalio.Direction.INPUT
 
 # --- Tuning Parameters ---
-LEVEL_THRESHOLD = 2.0    # degrees — if tilt is within this range, do nothing (dead zone)
+LEVEL_THRESHOLD = 0.5    # degrees — if tilt is within this range, do nothing (dead zone)
 MAX_SPEED = 60           # max motor speed % (keep below 100 to avoid violent corrections)
 MIN_SPEED = 15           # min speed % to overcome motor stiction
 KP = 1.5                 # proportional gain — increase if corrections are too slow,
@@ -351,6 +362,7 @@ def set_device_to_level(roll_offset):
             stop_motor()
             status = "LEVEL"
             speed_out = 0
+            log_event("ORIENTATION: LEVEL")
             break
         else:
             # Calculate correction speed proportional to tilt angle
@@ -363,9 +375,10 @@ def set_device_to_level(roll_offset):
 
             set_motor(speed_out)
             status = "CORRECTING"
+            log_event(f"ORIENTATION: CORRECTING | Tilt: {tilt:+.2f}deg | Speed: {speed_out:+.0f}%")
 
         direction = 1 if enc_b.value else -1
-        print(f"Tilt: {tilt:+.1f} deg | Speed: {speed_out:+.0f}% | Enc: {enc_a.count * direction} | Status: {status}")
+        log_data(f"Tilt: {tilt:+.1f} deg | Speed: {speed_out:+.0f}% | Enc: {enc_a.count * direction} | Status: {status}")
         time.sleep(0.05)  # 20Hz control loop
 
 

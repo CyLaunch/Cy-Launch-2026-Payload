@@ -72,16 +72,16 @@ Deployed from the nosecone after landing. Autonomously navigates to a soil colle
 | Adafruit MPL3115A2 Altimeter | Barometric altitude (flight detection) |
 | Adafruit PCA9685 PWM Driver | Supplies PWM signals to H-bridge motors via I2C |
 | Motor 1 — Drive, brushed ESC (encoder A=D11, B=D12) | Primary locomotion |
-| Motor 2 — Soil Collection, TB9051FTG H-bridge CH0/CH1 (no encoder, OCC=D13) | Soil collection mechanism |
-| Motor 3 — Orientation, TB9051FTG H-bridge CH2/CH3 (encoder A=D9, B=D10, OCC=D6) | Rover leveling, controlled via BNO055 roll |
+| Motor 2 — Soil Collection, TB9051FTG H-bridge CH0/CH1 (encoder A=D9, B=D10, OCC=D13) | Soil collection mechanism |
+| Motor 3 — Orientation, TB9051FTG H-bridge CH2/CH3 (no encoder, OCC=D6) | Rover leveling, controlled via BNO055 roll |
 
 ### Motor Configuration
 
 | Motor | Channel | Encoder | OCC Pin | Function |
 |---|---|---|---|---|
 | M1 — Drive (brushed ESC) | D5 PWM | A=D11, B=D12 | — | Forward/reverse locomotion |
-| M2 — Soil Collection (TB9051FTG) | PCA9685 CH0/CH1 | None | D13 | Soil collection mechanism |
-| M3 — Orientation (TB9051FTG) | PCA9685 CH2/CH3 | A=D9, B=D10 | D6 | Levels rover using BNO055 roll |
+| M2 — Soil Collection (TB9051FTG) | PCA9685 CH0/CH1 | A=D9, B=D10 | D13 | Soil collection mechanism |
+| M3 — Orientation (TB9051FTG) | PCA9685 CH2/CH3 | None | D6 | Levels rover using BNO055 roll |
 
 The BNO055 replaces a dedicated 9-DOF IMU — its onboard sensor fusion provides both raw accelerometer/gyro data for flight detection and fused Euler angles for orientation-based motor control, reducing I2C bus load to two sensors (BNO055 + MPL3115A2).
 

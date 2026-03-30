@@ -25,8 +25,8 @@ pca.frequency = 1000  # 1kHz PWM for motor drivers
 bno = adafruit_bno055.BNO055_I2C(i2c)
 
 # --- Orientation motor is on CH2 (forward) and CH3 (reverse) ---
-MOTOR_PWM1 = 2
-MOTOR_PWM2 = 3
+MOTOR_PWM1 = 0
+MOTOR_PWM2 = 1
 
 # --- Encoder (D9 = A, D10 = B) ---
 enc_a = countio.Counter(board.D9, edge=countio.Edge.RISE)
@@ -34,7 +34,7 @@ enc_b = digitalio.DigitalInOut(board.D10)
 enc_b.direction = digitalio.Direction.INPUT
 
 # --- Tuning Parameters ---
-LEVEL_THRESHOLD = 2.0    # degrees — if tilt is within this range, do nothing (dead zone)
+LEVEL_THRESHOLD = 0.5    # degrees — if tilt is within this range, do nothing (dead zone)
 MAX_SPEED = 60           # max motor speed % (keep below 100 to avoid violent corrections)
 MIN_SPEED = 15           # min speed % to overcome motor stiction
 KP = 1.5                 # proportional gain — increase if corrections are too slow,
@@ -62,13 +62,14 @@ def stop_motor():
     set_motor(0)
 
 # --- Calibration ---
-CALIBRATION_DURATION = 3.0   # seconds to collect level baseline
+CALIBRATION_DURATION = 3.0   # seconds to collect roll baseline
 CALIBRATION_DT       = 0.05  # 20 Hz sample rate during calibration
 
 def calibrate_level():
     """
     Collect roll readings for CALIBRATION_DURATION seconds with the rover
     sitting level on the ground. Returns the average roll as the zero offset.
+    Only roll is used — pitch and yaw are ignored.
     """
     print("=" * 45)
     print("  CALIBRATION")
@@ -85,7 +86,7 @@ def calibrate_level():
     while time.monotonic() < end_time:
         euler = bno.euler
         if euler is not None and euler[1] is not None:
-            samples.append(euler[1])  # roll
+            samples.append(euler[1])  # roll only
         time.sleep(CALIBRATION_DT)
 
     if not samples:
@@ -107,8 +108,6 @@ print()
 
 try:
     while True:
-        # Read Euler angles from BNO055
-        # euler returns (heading, roll, pitch) in degrees
         euler = bno.euler
 
         if euler is None or euler[1] is None:
@@ -117,10 +116,10 @@ try:
             time.sleep(0.5)
             continue
 
-        heading, roll, pitch = euler
+        # Only read roll — pitch and yaw are not used
+        roll = euler[1]
 
-        # Subtract calibrated offset so tilt = 0 when rover is at its ground-level position
-        # Swap to 'pitch' if your motor corrects front-to-back tilt instead
+        # Tilt relative to calibrated ground-level roll
         tilt = roll - roll_offset
 
         # --- Proportional Control ---
