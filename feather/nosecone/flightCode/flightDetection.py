@@ -30,7 +30,7 @@ DATA_FILE = "flight_data.txt"
 
 LAUNCH_ACCEL_THRESHOLD  = 20.0  # m/s² total — above this indicates motor ignition (~2G)
 LAUNCH_ALT_THRESHOLD    = 50.0  # meters AGL — altimeter must confirm we are airborne
-LANDED_ALT_THRESHOLD    = 50.0  # meters AGL — below this (after lockout) = landed
+LANDED_ALT_THRESHOLD    = 10.0  # meters AGL — below this (after lockout) = landed
 LANDING_LOCKOUT         = 10.0  # seconds after launch before landing is evaluated
 
 LAUNCH_CONFIRM = 5    # consecutive readings above accel threshold (+ alt check) to confirm launch
