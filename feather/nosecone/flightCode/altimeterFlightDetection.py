@@ -19,7 +19,8 @@ from adafruit_motor import servo
 # CONFIGURATION
 # ======================================================================================
 
-LOG_FILE = "flight_log.txt"
+LOG_FILE  = "flight_log.txt"
+DATA_FILE = "flight_data.txt"
 
 LAUNCH_ALT_THRESHOLD  = 50.0   # meters AGL — above this confirms launch
 LANDED_ALT_THRESHOLD  = 10.0   # meters AGL — below this starts landing timer
@@ -46,6 +47,15 @@ def log_event(event, altitude=None):
             f.write(line)
     except Exception as e:
         print(f"[LOG ERROR] Could not write to {LOG_FILE}: {e}")
+
+def log_flight_data(line):
+    timestamp = time.monotonic()
+    entry = f"[{timestamp:.3f}s] {line}\n"
+    try:
+        with open(DATA_FILE, "a") as f:
+            f.write(entry)
+    except Exception as e:
+        print(f"[LOG ERROR] Could not write to {DATA_FILE}: {e}")
 
 
 # ======================================================================================
@@ -168,7 +178,10 @@ def run_flight_mode():
             remaining = LANDING_HOLD_TIME - (time.monotonic() - detector.below_time)
             timer_str = f" | Landing in: {remaining:.1f}s"
 
-        print(f"State: {state:10s} | AGL: {agl:6.1f}m{timer_str}")
+        data_line = f"State: {state:10s} | AGL: {agl:6.1f}m{timer_str}"
+        print(data_line)
+        if state == FlightState.LAUNCHED:
+            log_flight_data(data_line)
 
         if state == FlightState.LANDED:
             log_event("EVENT: LANDING CONFIRMED", agl)

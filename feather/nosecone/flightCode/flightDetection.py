@@ -25,7 +25,8 @@ from adafruit_motor import servo
 # Set TEST_MODE = False → runs the full flight state machine
 # ======================================================================================
 
-LOG_FILE = "flight_log.txt"
+LOG_FILE  = "flight_log.txt"
+DATA_FILE = "flight_data.txt"
 
 LAUNCH_ACCEL_THRESHOLD  = 20.0  # m/s² total — above this indicates motor ignition (~2G)
 LAUNCH_ALT_THRESHOLD    = 50.0  # meters AGL — altimeter must confirm we are airborne
@@ -65,6 +66,15 @@ def log_data(line):
             f.write(entry)
     except Exception as e:
         print(f"[LOG ERROR] Could not write to {LOG_FILE}: {e}")
+
+def log_flight_data(line):
+    timestamp = time.monotonic()
+    entry = f"[{timestamp:.3f}s] {line}\n"
+    try:
+        with open(DATA_FILE, "a") as f:
+            f.write(entry)
+    except Exception as e:
+        print(f"[LOG ERROR] Could not write to {DATA_FILE}: {e}")
 
 
 # ======================================================================================
@@ -297,7 +307,10 @@ def run_flight_mode():
         state     = detector.update(agl, accel_mag)
 
         accel_std = detector._accel_std() if len(detector.accel_window) >= ACCEL_WINDOW else float('nan')
-        log_data(f"State: {state:10s} | AGL: {agl:6.1f}m | Accel: {accel_mag:5.1f}m/s² | StdDev: {accel_std:.3f}m/s²")
+        data_line = f"State: {state:10s} | AGL: {agl:6.1f}m | Accel: {accel_mag:5.1f}m/s² | StdDev: {accel_std:.3f}m/s²"
+        log_data(data_line)
+        if state == FlightState.LAUNCHED:
+            log_flight_data(data_line)
 
         if state == FlightState.LANDED:
             log_event("EVENT: LANDING CONFIRMED", agl)
