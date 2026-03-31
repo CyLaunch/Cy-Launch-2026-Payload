@@ -30,13 +30,11 @@ DATA_FILE = "flight_data.txt"
 
 LAUNCH_ACCEL_THRESHOLD  = 20.0  # m/s² total — above this indicates motor ignition (~2G)
 LAUNCH_ALT_THRESHOLD    = 50.0  # meters AGL — altimeter must confirm we are airborne
-LANDED_ALT_THRESHOLD    = 50.0  # meters AGL — below this (after lockout) = landed
-LANDED_ACCEL_STD_MAX    = 0.5   # m/s² — std dev of accel magnitude must be below this to confirm stillness
+LANDED_ALT_THRESHOLD    = 10.0  # meters AGL — below this (after lockout) = landed
 LANDING_LOCKOUT         = 10.0  # seconds after launch before landing is evaluated
-ACCEL_WINDOW            = 10    # rolling window size for accel std dev calculation
 
 LAUNCH_CONFIRM = 5    # consecutive readings above accel threshold (+ alt check) to confirm launch
-LANDED_CONFIRM = 10   # consecutive readings satisfying both alt and stillness checks to confirm landing
+LANDED_CONFIRM = 10   # consecutive readings below alt threshold to confirm landing
 
 LOOP_DT = 0.05        # 20 Hz
 
@@ -95,7 +93,6 @@ class FlightDetector:
         self.ground_alt    = None
         self.confirm_count = 0
         self.launch_time   = None   # monotonic timestamp set at launch confirmation
-        self.accel_window  = []     # rolling window of accel_mag readings for std dev
 
     def calibrate(self, altimeter, num_samples=50):
         """
@@ -124,20 +121,8 @@ class FlightDetector:
     def get_agl(self, altimeter):
         return altimeter.altitude - self.ground_alt
 
-    def _accel_std(self):
-        """Standard deviation of the rolling accel magnitude window."""
-        n = len(self.accel_window)
-        mean = sum(self.accel_window) / n
-        variance = sum((x - mean) ** 2 for x in self.accel_window) / n
-        return math.sqrt(variance)
-
     def update(self, agl, accel_mag):
         prev_state = self.state
-
-        # Maintain rolling accel window regardless of state.
-        self.accel_window.append(accel_mag)
-        if len(self.accel_window) > ACCEL_WINDOW:
-            self.accel_window.pop(0)
 
         if self.state == FlightState.IDLE:
             # Require sustained high acceleration AND altimeter confirmation above 50m.
@@ -158,12 +143,7 @@ class FlightDetector:
             # triggering a false landing event.
             elapsed = time.monotonic() - self.launch_time
             if elapsed >= LANDING_LOCKOUT:
-                # Require the window to be full before computing std dev, so we
-                # always judge stillness on a complete set of readings.
-                window_full = len(self.accel_window) >= ACCEL_WINDOW
-                still = window_full and self._accel_std() < LANDED_ACCEL_STD_MAX
-
-                if agl < LANDED_ALT_THRESHOLD and still:
+                if agl < LANDED_ALT_THRESHOLD:
                     self.confirm_count += 1
                     if self.confirm_count >= LANDED_CONFIRM:
                         self.state = FlightState.LANDED
@@ -306,8 +286,7 @@ def run_flight_mode():
         accel_mag = mag3(ax, ay, az)
         state     = detector.update(agl, accel_mag)
 
-        accel_std = detector._accel_std() if len(detector.accel_window) >= ACCEL_WINDOW else float('nan')
-        data_line = f"State: {state:10s} | AGL: {agl:6.1f}m | Accel: {accel_mag:5.1f}m/s² | StdDev: {accel_std:.3f}m/s²"
+        data_line = f"State: {state:10s} | AGL: {agl:6.1f}m | Accel: {accel_mag:5.1f}m/s²"
         log_data(data_line)
         if state == FlightState.LAUNCHED:
             log_flight_data(data_line)
