@@ -7,7 +7,6 @@
 #          altimeter drops back below 50m AGL, with a 10-second post-launch lockout to
 #          prevent false triggers during boost. At ~4800ft apogee this approach is
 #          reliable without requiring a Kalman filter.
-#          Set TEST_MODE = True to run servo and sensor diagnostics instead of flight mode.
 # Contact: wons123@iastate.edu
 # ======================================================================================
 

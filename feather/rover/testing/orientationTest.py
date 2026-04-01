@@ -2,16 +2,20 @@
 # Developer: Noah Wons
 # Program: Test script for orientation-based motor control using BNO055 IMU and PCA9685 on FeatherWing M4 Express
 # Additional Notes:
-# - This script reads the roll angle from the BNO055 IMU and uses it to control a single motor for leveling.
-# - The motor will attempt to correct any tilt by running in the appropriate direction and speed proportional to the angle of tilt.
-# - A dead zone is implemented to prevent constant small corrections when the system is nearly level.
-# - Tuning parameters (KP, MAX_SPEED, MIN_SPEED) may need adjustment based on your specific motor and mechanical setup.
-# - NOTE: Orientation motor is on PWM channels 2 and 3. Encoder A on D9, B on D10.
-# 
+# - Level is determined by comparing the Y and Z components of the gravity vector to a
+#   calibrated reference, ignoring the X axis entirely.
+# - The motor will attempt to correct any tilt by running in the appropriate direction
+#   and speed proportional to the signed Y-Z angle from the calibrated reference.
+# - A dead zone is implemented to prevent constant small corrections when nearly level.
+# - Tuning parameters (KP, MAX_SPEED, MIN_SPEED) may need adjustment based on your
+#   specific motor and mechanical setup.
+# - NOTE: Orientation motor is on PWM channels 0 and 1. Encoder A on D9, B on D10.
+#
 # Contact: wons123@iastate.edu
 # ======================================================================================
 
 import time
+import math
 import board
 import countio
 import digitalio
@@ -21,10 +25,10 @@ import adafruit_bno055
 # --- Setup I2C, PCA9685, and BNO055 ---
 i2c = board.I2C()
 pca = PCA9685(i2c)
-pca.frequency = 1000  # 1kHz PWM for motor drivers
+pca.frequency = 1000
 bno = adafruit_bno055.BNO055_I2C(i2c)
 
-# --- Orientation motor is on CH2 (forward) and CH3 (reverse) ---
+# --- Orientation motor is on CH0 (forward) and CH1 (reverse) ---
 MOTOR_PWM1 = 0
 MOTOR_PWM2 = 1
 
@@ -34,43 +38,38 @@ enc_b = digitalio.DigitalInOut(board.D10)
 enc_b.direction = digitalio.Direction.INPUT
 
 # --- Tuning Parameters ---
-LEVEL_THRESHOLD = 0.5    # degrees — if tilt is within this range, do nothing (dead zone)
-MAX_SPEED = 60           # max motor speed % (keep below 100 to avoid violent corrections)
-MIN_SPEED = 15           # min speed % to overcome motor stiction
-KP = 1.5                 # proportional gain — increase if corrections are too slow,
-                         # decrease if motor overshoots/oscillates
-
-# --- Motor Control ---
-def set_motor(speed):
-    """
-    speed: -100 to 100
-    positive = forward, negative = reverse, 0 = stop
-    """
-    speed = max(-100, min(100, speed))  # clamp to safe range
-    duty = int(abs(speed) / 100 * 65535)
-    if speed > 0:
-        pca.channels[MOTOR_PWM1].duty_cycle = duty
-        pca.channels[MOTOR_PWM2].duty_cycle = 0
-    elif speed < 0:
-        pca.channels[MOTOR_PWM1].duty_cycle = 0
-        pca.channels[MOTOR_PWM2].duty_cycle = duty
-    else:
-        pca.channels[MOTOR_PWM1].duty_cycle = 0
-        pca.channels[MOTOR_PWM2].duty_cycle = 0
-
-def stop_motor():
-    set_motor(0)
+LEVEL_THRESHOLD = 0.5    # degrees — dead zone around calibrated position
+MAX_SPEED       = 60     # max motor speed %
+MIN_SPEED       = 15     # min speed % to overcome motor stiction
+KP              = 1.5    # proportional gain
 
 # --- Calibration ---
-CALIBRATION_DURATION = 3.0   # seconds to collect roll baseline
-CALIBRATION_DT       = 0.05  # 20 Hz sample rate during calibration
+CALIBRATION_DURATION = 3.0
+CALIBRATION_DT       = 0.1
+
+
+def yz_angle(v1, v2):
+    """Unsigned angle in degrees between two gravity vectors using only Y and Z.
+    Ignores X so rotation around the X axis does not affect the level reading."""
+    y1, z1 = v1[1], v1[2]
+    y2, z2 = v2[1], v2[2]
+    dot  = y1 * y2 + z1 * z2
+    mag1 = math.sqrt(y1 * y1 + z1 * z1)
+    mag2 = math.sqrt(y2 * y2 + z2 * z2)
+    if mag1 == 0 or mag2 == 0:
+        return 0.0
+    return math.degrees(math.acos(max(-1.0, min(1.0, dot / (mag1 * mag2)))))
+
+
+def signed_yz_tilt(ref, g):
+    """Signed angle in degrees in the Y-Z plane relative to the reference.
+    Positive/negative sign determines motor correction direction."""
+    ref_angle = math.atan2(ref[2], ref[1])
+    cur_angle = math.atan2(g[2],   g[1])
+    return math.degrees(cur_angle - ref_angle)
+
 
 def calibrate_level():
-    """
-    Collect roll readings for CALIBRATION_DURATION seconds with the rover
-    sitting level on the ground. Returns the average roll as the zero offset.
-    Only roll is used — pitch and yaw are ignored.
-    """
     print("=" * 45)
     print("  CALIBRATION")
     print("  Place the rover on level ground and")
@@ -84,22 +83,41 @@ def calibrate_level():
     print(f"Collecting {CALIBRATION_DURATION:.0f}s of data...", end="")
 
     while time.monotonic() < end_time:
-        euler = bno.euler
-        if euler is not None and euler[1] is not None:
-            samples.append(euler[1])  # roll only
+        g = bno.gravity
+        if g is not None and all(v is not None for v in g):
+            samples.append(g)
         time.sleep(CALIBRATION_DT)
 
     if not samples:
-        print(" FAILED (no IMU data). Defaulting offset to 0.0")
-        return 0.0
+        print(" FAILED (no IMU data). Defaulting to (0, 0, -9.8)")
+        return (0.0, 0.0, -9.8)
 
-    offset = sum(samples) / len(samples)
+    ref = tuple(sum(s[i] for s in samples) / len(samples) for i in range(3))
     print(f" done ({len(samples)} samples)")
-    print(f"  Roll offset: {offset:+.2f} deg")
+    print(f"  Gravity reference: X={ref[0]:+.3f}  Y={ref[1]:+.3f}  Z={ref[2]:+.3f} m/s²")
     print()
-    return offset
+    return ref
 
-roll_offset = calibrate_level()
+
+# --- Motor Control ---
+def set_motor(speed):
+    speed = max(-100, min(100, speed))
+    duty  = int(abs(speed) / 100 * 65535)
+    if speed > 0:
+        pca.channels[MOTOR_PWM1].duty_cycle = duty
+        pca.channels[MOTOR_PWM2].duty_cycle = 0
+    elif speed < 0:
+        pca.channels[MOTOR_PWM1].duty_cycle = 0
+        pca.channels[MOTOR_PWM2].duty_cycle = duty
+    else:
+        pca.channels[MOTOR_PWM1].duty_cycle = 0
+        pca.channels[MOTOR_PWM2].duty_cycle = 0
+
+def stop_motor():
+    set_motor(0)
+
+
+ref_gravity = calibrate_level()
 
 print("Starting leveling loop. Press CTRL+C to stop.")
 print(f"Dead zone: +/- {LEVEL_THRESHOLD} degrees")
@@ -108,41 +126,33 @@ print()
 
 try:
     while True:
-        euler = bno.euler
+        g = bno.gravity
 
-        if euler is None or euler[1] is None:
+        if g is None or any(v is None for v in g):
             print("No IMU data — check wiring!")
             stop_motor()
             time.sleep(0.5)
             continue
 
-        # Only read roll — pitch and yaw are not used
-        roll = euler[1]
+        tilt      = signed_yz_tilt(ref_gravity, g)
+        angle     = yz_angle(ref_gravity, g)
+        speed_out = 0
 
-        # Tilt relative to calibrated ground-level roll
-        tilt = roll - roll_offset
-
-        # --- Proportional Control ---
-        if abs(tilt) <= LEVEL_THRESHOLD:
-            # Within dead zone — hold still
+        if angle <= LEVEL_THRESHOLD:
             stop_motor()
             status = "LEVEL"
-            speed_out = 0
         else:
-            # Calculate correction speed proportional to tilt angle
             raw_speed = KP * tilt
-            # Enforce minimum speed so motor actually moves
             if raw_speed > 0:
                 speed_out = max(MIN_SPEED, min(MAX_SPEED, raw_speed))
             else:
                 speed_out = min(-MIN_SPEED, max(-MAX_SPEED, raw_speed))
-
             set_motor(speed_out)
             status = "CORRECTING"
 
         direction = 1 if enc_b.value else -1
-        print(f"Tilt: {tilt:+.1f} deg | Speed: {speed_out:+.0f}% | Enc: {enc_a.count * direction} | Status: {status}")
-        time.sleep(0.05)  # 20Hz control loop
+        print(f"Angle: {angle:+.1f} deg | Speed: {speed_out:+.0f}% | Enc: {enc_a.count * direction} | Status: {status}")
+        time.sleep(0.05)
 
 except KeyboardInterrupt:
     print("\nStopped by user.")
