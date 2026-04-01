@@ -3,8 +3,8 @@
 # Program: Altimeter-only flight detection for nosecone system using MPL3115A2.
 #          Launch is detected when altitude exceeds 50m AGL.
 #          Landing is detected when altitude drops back below 10m AGL and remains
-#          there for 30 seconds. Servo holds at 0 degrees throughout flight and
-#          rotates to 45 degrees upon landing confirmation.
+#          there for 30 seconds. Servo holds at 45 degrees throughout flight and
+#          rotates to 0 degrees upon landing confirmation.
 # Contact: wons123@iastate.edu
 # ======================================================================================
 
