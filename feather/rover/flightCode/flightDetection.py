@@ -1,51 +1,76 @@
 # ======================================================================================
 # Developer: Noah Wons
-# Program: Flight detection for rover deployment using MPL3115A2 altimeter and
-#          BNO055 absolute orientation IMU on FeatherWing M4 Express.
-#          Launch is detected via BNO055 accelerometer threshold (motor ignition
-#          signature), confirmed by altimeter reading above 50m AGL. Landing is
-#          detected once the altimeter drops back below 50m AGL with a 10-second
-#          post-launch lockout to prevent false triggers during boost.
-#          Set TEST_MODE = True to run sensor diagnostics instead of flight mode.
+# Program: Altimeter-only flight detection for rover system using MPL3115A2.
+#          Launch is detected when altitude exceeds 50m AGL.
+#          Landing is detected when altitude drops back below 10m AGL and remains
+#          there for 20 seconds. After a 20s nosecone lockout, the orientation motor
+#          runs a forward/reverse sequence, then the soil sensor collects one valid
+#          reading.
 # Contact: wons123@iastate.edu
 # ======================================================================================
 
 import time
-import math
 import board
+import busio
 import countio
 import digitalio
+import struct
 import adafruit_mpl3115a2
-import adafruit_bno055
 from adafruit_pca9685 import PCA9685
 
 # ======================================================================================
-# GLOBAL CONFIGURATION
+# CONFIGURATION
 # ======================================================================================
 
 LOG_FILE  = "flight_log.txt"
 DATA_FILE = "flight_data.txt"
 
-LAUNCH_ACCEL_THRESHOLD  = 20.0  # m/s² total — above this indicates motor ignition (~2G)
-LAUNCH_ALT_THRESHOLD    = 50.0  # meters AGL — altimeter must confirm we are airborne
-LANDED_ALT_THRESHOLD    = 10.0  # meters AGL — below this (after lockout) = landed
-LANDING_LOCKOUT         = 10.0  # seconds after launch before landing is evaluated
+LAUNCH_ALT_THRESHOLD  = 50   # meters AGL — above this confirms launch
+LANDED_ALT_THRESHOLD  = 10   # meters AGL — below this starts landing timer
+LANDING_HOLD_TIME     = 20   # seconds below LANDED_ALT_THRESHOLD to confirm landing
+LANDING_LOCKOUT       = 0    # seconds after launch before landing is evaluated
 
-LAUNCH_CONFIRM = 5    # consecutive readings above accel threshold (+ alt check) to confirm launch
-LANDED_CONFIRM = 10   # consecutive readings below alt threshold to confirm landing
+LAUNCH_CONFIRM = 5           # consecutive readings above threshold to confirm launch
 
-LOOP_DT = 0.05        # 20 Hz
+LOOP_DT = 0.05               # 20 Hz
+
+NOSECONE_LOCKOUT = 20        # seconds to wait after landing before rover activates
+
+# --- Motor sequence (matches tripleSlowMotorTest, duration extended to 20s) ---
+SLOW_SPEED  = 100             # % duty cycle
+RUN_TIME    = 20.0           # seconds per direction
+RAMP_TIME   = 1.0            # seconds to ramp from 0 to target speed
+RAMP_STEPS  = 20             # increments during ramp
+
+# --- Soil sensor ---
+BAUD       = 9600
+SLAVE_ADDR = 0x01
+DE_RE_PIN  = board.D5
+REG_PH       = 0x0006
+REG_HUMIDITY = 0x0012
+REG_EC       = 0x0015
+REG_NPK      = 0x001E
 
 
 # ======================================================================================
-# Logging helper
+# Logging
 # ======================================================================================
+def fmt_time(t):
+    t = int(t * 1000)
+    ms = t % 1000
+    t //= 1000
+    s = t % 60
+    t //= 60
+    m = t % 60
+    h = t // 60
+    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
+
 def log_event(event, altitude=None):
-    timestamp = time.monotonic()
+    timestamp = fmt_time(time.monotonic())
     if altitude is not None:
-        line = f"[{timestamp:.3f}s] {event} | Alt: {altitude:.2f}m AGL\n"
+        line = f"[{timestamp}] {event} | Alt: {altitude:.2f}m AGL\n"
     else:
-        line = f"[{timestamp:.3f}s] {event}\n"
+        line = f"[{timestamp}] {event}\n"
     print(line, end="")
     try:
         with open(LOG_FILE, "a") as f:
@@ -53,19 +78,9 @@ def log_event(event, altitude=None):
     except Exception as e:
         print(f"[LOG ERROR] Could not write to {LOG_FILE}: {e}")
 
-def log_data(line):
-    timestamp = time.monotonic()
-    entry = f"[{timestamp:.3f}s] {line}\n"
-    print(entry, end="")
-    try:
-        with open(LOG_FILE, "a") as f:
-            f.write(entry)
-    except Exception as e:
-        print(f"[LOG ERROR] Could not write to {LOG_FILE}: {e}")
-
 def log_flight_data(line):
-    timestamp = time.monotonic()
-    entry = f"[{timestamp:.3f}s] {line}\n"
+    timestamp = fmt_time(time.monotonic())
+    entry = f"[{timestamp}] {line}\n"
     try:
         with open(DATA_FILE, "a") as f:
             f.write(entry)
@@ -90,26 +105,19 @@ class FlightDetector:
         self.state         = FlightState.IDLE
         self.ground_alt    = None
         self.confirm_count = 0
-        self.launch_time   = None   # monotonic timestamp set at launch confirmation
+        self.launch_time   = None
+        self.below_time    = None
 
     def calibrate(self, altimeter, num_samples=50):
-        """
-        Measure local sea-level pressure and ground altitude baseline.
-        Keep the vehicle still during calibration.
-        """
         pres_readings = []
-
-        print("Calibrating... collecting pressure baseline.")
+        print("Calibrating altimeter... keep the vehicle still.")
         for _ in range(num_samples):
             pres_readings.append(altimeter.pressure)
             time.sleep(LOOP_DT)
 
-        # Set sealevel_pressure to the measured local value so the altimeter
-        # reports ~0m AGL at the launch site, correcting for weather and elevation.
         local_pressure = sum(pres_readings) / len(pres_readings)
         altimeter.sealevel_pressure = local_pressure
 
-        # Re-sample altitude with the corrected pressure reference.
         alt_readings = [altimeter.altitude for _ in range(10)]
         self.ground_alt = sum(alt_readings) / len(alt_readings)
 
@@ -119,36 +127,31 @@ class FlightDetector:
     def get_agl(self, altimeter):
         return altimeter.altitude - self.ground_alt
 
-    def update(self, agl, accel_mag):
+    def update(self, agl):
         prev_state = self.state
+        now = time.monotonic()
 
         if self.state == FlightState.IDLE:
-            # Require sustained high acceleration AND altimeter confirmation above 50m.
-            # High accel catches ignition fast; alt check prevents false triggers from
-            # pad handling or accidental bumps.
-            if accel_mag > LAUNCH_ACCEL_THRESHOLD and agl > LAUNCH_ALT_THRESHOLD:
+            if agl > LAUNCH_ALT_THRESHOLD:
                 self.confirm_count += 1
                 if self.confirm_count >= LAUNCH_CONFIRM:
                     self.state = FlightState.LAUNCHED
-                    self.launch_time = time.monotonic()
+                    self.launch_time = now
                     self.confirm_count = 0
-                    log_event("EVENT: LAUNCH CONFIRMED", agl)
+                    self.below_time = None
             else:
                 self.confirm_count = 0
 
         elif self.state == FlightState.LAUNCHED:
-            # Do not evaluate landing until LANDING_LOCKOUT seconds have elapsed.
-            # This prevents any transient low-altitude readings during boost from
-            # triggering a false landing event.
-            elapsed = time.monotonic() - self.launch_time
+            elapsed = now - self.launch_time
             if elapsed >= LANDING_LOCKOUT:
                 if agl < LANDED_ALT_THRESHOLD:
-                    self.confirm_count += 1
-                    if self.confirm_count >= LANDED_CONFIRM:
+                    if self.below_time is None:
+                        self.below_time = now
+                    elif (now - self.below_time) >= LANDING_HOLD_TIME:
                         self.state = FlightState.LANDED
-                        self.confirm_count = 0
                 else:
-                    self.confirm_count = 0
+                    self.below_time = None
 
         if self.state != prev_state:
             log_event(f"STATE: {prev_state} -> {self.state}", agl)
@@ -157,223 +160,339 @@ class FlightDetector:
 
 
 # ======================================================================================
+# Motor class — from tripleSlowMotorTest
+# ======================================================================================
+class Motor:
+    def __init__(self, pca, ch_fwd, ch_rev, occ_pin, enc_a_pin=None, enc_b_pin=None, name="Motor"):
+        self.name = name
+        self._pca = pca
+        self._ch_fwd = ch_fwd
+        self._ch_rev = ch_rev
+
+        self.occ = digitalio.DigitalInOut(occ_pin)
+        self.occ.direction = digitalio.Direction.INPUT
+        self.occ.pull = digitalio.Pull.UP
+
+        if enc_a_pin is not None:
+            self.enc_a = countio.Counter(enc_a_pin, edge=countio.Edge.RISE)
+        else:
+            self.enc_a = None
+
+        if enc_b_pin is not None:
+            self.enc_b = digitalio.DigitalInOut(enc_b_pin)
+            self.enc_b.direction = digitalio.Direction.INPUT
+        else:
+            self.enc_b = None
+
+    def set_speed(self, speed):
+        speed = max(-100, min(100, speed))
+        duty = int(abs(speed) / 100 * 65535)
+        if speed > 0:
+            self._pca.channels[self._ch_fwd].duty_cycle = duty
+            self._pca.channels[self._ch_rev].duty_cycle = 0
+        elif speed < 0:
+            self._pca.channels[self._ch_fwd].duty_cycle = 0
+            self._pca.channels[self._ch_rev].duty_cycle = duty
+        else:
+            self._pca.channels[self._ch_fwd].duty_cycle = 0
+            self._pca.channels[self._ch_rev].duty_cycle = 0
+
+    def stop(self):
+        self.set_speed(0)
+
+    @property
+    def encoder_count(self):
+        if self.enc_a is None:
+            return None
+        direction = 1 if (self.enc_b.value if self.enc_b else True) else -1
+        return self.enc_a.count * direction
+
+    @property
+    def overcurrent(self):
+        return not self.occ.value
+
+    def reset_encoder(self):
+        if self.enc_a is not None:
+            self.enc_a.reset()
+
+    def deinit(self):
+        self.stop()
+        self.occ.deinit()
+        if self.enc_a is not None:
+            self.enc_a.deinit()
+        if self.enc_b is not None:
+            self.enc_b.deinit()
+
+
+# ======================================================================================
+# Motor helpers — from tripleSlowMotorTest
+# ======================================================================================
+def stop_all(motors):
+    for m in motors:
+        m.stop()
+
+def ramp_all(motors, target_speed):
+    step_delay = RAMP_TIME / RAMP_STEPS
+    sign = 1 if target_speed >= 0 else -1
+    for i in range(1, RAMP_STEPS + 1):
+        current = sign * (abs(target_speed) * i / RAMP_STEPS)
+        for m in motors:
+            m.set_speed(current)
+        time.sleep(step_delay)
+
+def run_all_and_report(motors, speed, duration):
+    for m in motors:
+        m.set_speed(speed)
+
+    end = time.monotonic() + duration
+    last_print = 0
+    faulted = []
+
+    while time.monotonic() < end:
+        now = time.monotonic()
+        if now - last_print >= 0.25:
+            parts = []
+            for m in motors:
+                occ_str = " OCC!" if m.overcurrent else ""
+                enc = m.encoder_count
+                enc_str = f"{enc:6d}" if enc is not None else "   N/A"
+                parts.append(f"{m.name}: {enc_str}{occ_str}")
+                if m.overcurrent and m.name not in faulted:
+                    faulted.append(m.name)
+            print("  " + "  |  ".join(parts))
+            last_print = now
+
+        if faulted:
+            print(f"Overcurrent on {faulted} — stopping all.")
+            stop_all(motors)
+            return
+
+
+# ======================================================================================
+# Soil sensor — from testSoilTester
+# ======================================================================================
+def crc16(data):
+    crc = 0xFFFF
+    for byte in data:
+        crc ^= byte
+        for _ in range(8):
+            if crc & 0x0001:
+                crc = (crc >> 1) ^ 0xA001
+            else:
+                crc >>= 1
+    return crc
+
+def build_read_request(slave, start, count):
+    frame = struct.pack(">BBHH", slave, 0x03, start, count)
+    c = crc16(frame)
+    frame += struct.pack("<H", c)
+    return frame
+
+def modbus_read(uart, de_re, slave, start, count):
+    request = build_read_request(slave, start, count)
+
+    while uart.in_waiting:
+        uart.read(uart.in_waiting)
+
+    de_re.value = True
+    time.sleep(0.005)
+    uart.write(request)
+    time.sleep(len(request) * 12 / BAUD + 0.002)
+    de_re.value = False
+
+    expected = 3 + count * 2 + 2
+    max_bytes = len(request) + expected
+    deadline = time.monotonic() + 5.0
+    buf = bytearray()
+
+    while len(buf) < max_bytes and time.monotonic() < deadline:
+        avail = uart.in_waiting
+        if avail:
+            buf.extend(uart.read(avail))
+        else:
+            time.sleep(0.005)
+
+    resp_start = None
+    expected_byte_count = count * 2
+    for i in range(len(buf) - 2):
+        if buf[i] == slave and buf[i + 1] == 0x03 and buf[i + 2] == expected_byte_count:
+            resp_start = i
+            break
+
+    if resp_start is None or len(buf) - resp_start < expected:
+        print(f"  !! Timeout — got {len(buf)} bytes: {bytes(buf).hex()}")
+        return None
+
+    buf = buf[resp_start:]
+    payload = buf[: expected - 2]
+    rx_crc = buf[expected - 2] | (buf[expected - 1] << 8)
+    if crc16(payload) != rx_crc:
+        print("  !! CRC mismatch")
+        return None
+
+    if buf[1] & 0x80:
+        print(f"  !! Modbus exception code {buf[2]:#04x}")
+        return None
+
+    values = []
+    for i in range(count):
+        val = struct.unpack_from(">h", buf, 3 + i * 2)[0]
+        values.append(val)
+    return values
+
+def collect_valid_soil_reading(uart, de_re):
+    """Poll until all four Modbus reads succeed and return the reading."""
+    print("Collecting soil data — retrying until a complete valid reading is received...")
+    while True:
+        ph_regs  = modbus_read(uart, de_re, SLAVE_ADDR, REG_PH,       1)
+        ht_regs  = modbus_read(uart, de_re, SLAVE_ADDR, REG_HUMIDITY,  2)
+        ec_regs  = modbus_read(uart, de_re, SLAVE_ADDR, REG_EC,        1)
+        npk_regs = modbus_read(uart, de_re, SLAVE_ADDR, REG_NPK,       3)
+
+        if all(r is not None for r in [ph_regs, ht_regs, ec_regs, npk_regs]):
+            return ph_regs[0], ht_regs[0], ht_regs[1], ec_regs[0], npk_regs[0], npk_regs[1], npk_regs[2]
+
+        print("  !! Incomplete reading — retrying...")
+        time.sleep(1)
+
+def log_soil_reading(ph_r, hum_r, temp_r, ec_r, n_r, p_r, k_r):
+    ph       = ph_r / 100.0
+    moisture = hum_r / 10.0
+    temp_c   = temp_r / 10.0
+    temp_f   = temp_c * 9.0 / 5.0 + 32.0
+    ec       = ec_r
+    n, p, k  = n_r, p_r, k_r
+
+    lines = [
+        "── SOIL READING ──────────────────",
+        f"  Moisture      : {moisture:.1f} %RH",
+        f"  Temperature   : {temp_c:.1f} °C  /  {temp_f:.1f} °F",
+        f"  Conductivity  : {ec} µS/cm",
+        f"  pH            : {ph:.2f}",
+        f"  Nitrogen  (N) : {n} mg/kg",
+        f"  Phosphorus(P) : {p} mg/kg",
+        f"  Potassium (K) : {k} mg/kg",
+        "──────────────────────────────────",
+    ]
+    for line in lines:
+        print(line)
+        log_event(line)
+
+
+# ======================================================================================
 # Hardware Setup
 # ======================================================================================
-def mag3(x, y, z):
-    return math.sqrt(x * x + y * y + z * z)
-
-i2c = board.I2C()
+i2c = busio.I2C(board.SCL, board.SDA)
 
 # --- Altimeter ---
 print("Initializing MPL3115A2 altimeter...")
 altimeter = None
 try:
     altimeter = adafruit_mpl3115a2.MPL3115A2(i2c)
-    altimeter.sealevel_pressure = 101325  # Temporary default; overwritten during calibrate()
+    altimeter.sealevel_pressure = 101325
     print("  OK MPL3115A2 found")
 except Exception as e:
     print(f"  ERROR MPL3115A2 not detected: {e}")
 
-print("Initializing PCA9685 PWM driver...")
-pca = None
-try:    
-    pca = PCA9685(i2c)
-    pca.frequency = 1000
-    print("  OK PCA9685 found at 0x40")
-except Exception as e:
-    print(f"  ERROR PCA9685 not detected: {e}")
+if altimeter is None:
+    print("ERROR: Altimeter required. Halting.")
+    while True:
+        time.sleep(1)
 
+# --- PCA9685 ---
+print("Initializing PCA9685...")
+while not i2c.try_lock():
+    pass
+found = [hex(a) for a in i2c.scan()]
+i2c.unlock()
+print(f"  I2C devices: {found}")
+if "0x40" not in found:
+    print("  ERROR: PCA9685 not found at 0x40 — check wiring/power and restart.")
+    while True:
+        time.sleep(1)
+pca = PCA9685(i2c)
+pca.frequency = 1000
+print("  PCA9685 OK")
 
-# --- BNO055 (absolute orientation IMU — accel + gyro used for flight detection) ---
-print("Initializing BNO055 IMU...")
-imu = None
-for addr in (0x28, 0x29):
-    try:
-        imu = adafruit_bno055.BNO055_I2C(i2c, address=addr)
-        print(f"  OK BNO055 found at 0x{addr:02X}")
-        break
-    except Exception as e:
-        print(f"  Not at 0x{addr:02X}: {e}")
+# --- Soil sensor UART ---
+de_re = digitalio.DigitalInOut(DE_RE_PIN)
+de_re.direction = digitalio.Direction.OUTPUT
+de_re.value = False
 
-if imu is None:
-    print("  ERROR: BNO055 not detected. Check wiring.")
+uart = busio.UART(
+    board.TX,
+    board.RX,
+    baudrate=BAUD,
+    bits=8,
+    parity=None,
+    stop=1,
+    timeout=1,
+)
+
 
 # ======================================================================================
-# FLIGHT MODE
+# Flight Mode
 # ======================================================================================
 def run_flight_mode():
-    if altimeter is None or imu is None:
-        print("ERROR: Required sensors missing. Cannot run flight mode.")
-        return
-
     detector = FlightDetector()
 
     log_event("BOOT: Flight computer started")
-    print("Calibrating... keep the vehicle still.")
     detector.calibrate(altimeter)
-    roll_offset = calibrate_level()   # capture level baseline before launch
-    log_event(f"CALIBRATION: ground_alt={detector.ground_alt:.2f}m  roll_offset={roll_offset:+.2f}deg")
+    log_event(f"CALIBRATION: ground_alt={detector.ground_alt:.2f}m")
     print("Ready. Waiting for launch...\n")
 
     while True:
-        agl            = detector.get_agl(altimeter)
-        ax, ay, az     = imu.acceleration
-        accel_mag      = mag3(ax, ay, az)
-        state          = detector.update(agl, accel_mag)
+        agl   = detector.get_agl(altimeter)
+        state = detector.update(agl)
 
-        data_line = f"State: {state:10s} | AGL: {agl:6.1f}m | Accel: {accel_mag:5.1f}m/s²"
-        log_data(data_line)
+        timer_str = ""
+        if state == FlightState.LAUNCHED and detector.below_time is not None:
+            remaining = LANDING_HOLD_TIME - (time.monotonic() - detector.below_time)
+            timer_str = f" | Landing in: {remaining:.1f}s"
+
+        data_line = f"State: {state:10s} | AGL: {agl:6.1f}m{timer_str}"
+        print(data_line)
         if state == FlightState.LAUNCHED:
             log_flight_data(data_line)
 
         if state == FlightState.LANDED:
             log_event("EVENT: LANDING CONFIRMED", agl)
-            print("\nLanding confirmed. Waiting 15 seconds for nosecone retention pins to retract...")
-            time.sleep(15)
-            log_event("EVENT: POST-LANDING LOCKOUT COMPLETE")
 
-            # TODO: add rover post-landing logic here
-            # e.g. deploy rover, start motors, begin navigation
+            # --- Nosecone lockout ---
+            log_event(f"EVENT: Waiting {NOSECONE_LOCKOUT}s for nosecone lockout")
+            time.sleep(NOSECONE_LOCKOUT)
 
-            set_device_to_level(roll_offset)
+            # --- Motor sequence (tripleSlowMotorTest, RUN_TIME = 20s) ---
+            motors = [
+                Motor(pca, ch_fwd=0, ch_rev=1, occ_pin=board.D6, name="Drive"),
+                Motor(pca, ch_fwd=11, ch_rev=10, occ_pin=board.D10, name="Orientation"),
 
-            break
+            ]
+            for m in motors:
+                m.reset_encoder()
+
+            print(f"\nFORWARD {SLOW_SPEED}%  (ramping over {RAMP_TIME}s)")
+            log_event(f"EVENT: MOTOR FORWARD START ({SLOW_SPEED}% for {RUN_TIME}s)")
+            run_all_and_report(motors, SLOW_SPEED, RUN_TIME)
+            stop_all(motors)
+            time.sleep(1)
+
+
+            for m in motors:
+                m.deinit()
+            pca.deinit()
+            log_event("EVENT: MOTOR SEQUENCE COMPLETE")
+
+            # --- Soil sensor ---
+            log_event("EVENT: SOIL SAMPLING START")
+            reading = collect_valid_soil_reading(uart, de_re)
+            log_soil_reading(*reading)
+            log_event("EVENT: SOIL SAMPLING COMPLETE")
+
+            while True:
+                time.sleep(1)
 
         time.sleep(LOOP_DT)
-
-# ======================================================================================
-# Orientation Motor Setup
-# ======================================================================================
-pca = PCA9685(i2c)
-pca.frequency = 1000  # 1kHz PWM for motor drivers
-
-# --- Orientation motor is on CH2 (forward) and CH3 (reverse) ---
-MOTOR_PWM1 = 0
-MOTOR_PWM2 = 1
-
-# --- Encoder (D9 = A, D10 = B) ---
-enc_a = countio.Counter(board.D9, edge=countio.Edge.RISE)
-enc_b = digitalio.DigitalInOut(board.D10)
-enc_b.direction = digitalio.Direction.INPUT
-
-# --- Tuning Parameters ---
-LEVEL_THRESHOLD = 0.5    # degrees — if tilt is within this range, do nothing (dead zone)
-MAX_SPEED = 60           # max motor speed % (keep below 100 to avoid violent corrections)
-MIN_SPEED = 15           # min speed % to overcome motor stiction
-KP = 1.5                 # proportional gain — increase if corrections are too slow,
-                         # decrease if motor overshoots/oscillates
-
-# --- Motor Control ---
-def set_motor(speed):
-    """
-    speed: -100 to 100
-    positive = forward, negative = reverse, 0 = stop
-    """
-    speed = max(-100, min(100, speed))  # clamp to safe range
-    duty = int(abs(speed) / 100 * 65535)
-    if speed > 0:
-        pca.channels[MOTOR_PWM1].duty_cycle = duty
-        pca.channels[MOTOR_PWM2].duty_cycle = 0
-    elif speed < 0:
-        pca.channels[MOTOR_PWM1].duty_cycle = 0
-        pca.channels[MOTOR_PWM2].duty_cycle = duty
-    else:
-        pca.channels[MOTOR_PWM1].duty_cycle = 0
-        pca.channels[MOTOR_PWM2].duty_cycle = 0
-
-def stop_motor():
-    set_motor(0)
-
-# --- Calibration ---
-CALIBRATION_DURATION = 3.0   # seconds to collect level baseline
-CALIBRATION_DT       = 0.05  # 20 Hz sample rate during calibration
-
-def calibrate_level():
-    """
-    Collect roll readings for CALIBRATION_DURATION seconds with the rover
-    sitting level on the ground. Returns the average roll as the zero offset.
-    """
-    print("=" * 45)
-    print("  CALIBRATION")
-    print("  Place the rover on level ground and")
-    print("  keep it still.")
-    print("  Starting in 3 seconds...")
-    print("=" * 45)
-    time.sleep(3)
-
-    samples = []
-    end_time = time.monotonic() + CALIBRATION_DURATION
-    print(f"Collecting {CALIBRATION_DURATION:.0f}s of data...", end="")
-
-    while time.monotonic() < end_time:
-        euler = imu.euler
-        if euler is not None and euler[1] is not None:
-            samples.append(euler[1])  # roll
-        time.sleep(CALIBRATION_DT)
-
-    if not samples:
-        print(" FAILED (no IMU data). Defaulting offset to 0.0")
-        return 0.0
-
-    offset = sum(samples) / len(samples)
-    print(f" done ({len(samples)} samples)")
-    print(f"  Roll offset: {offset:+.2f} deg")
-    print()
-    return offset
-
-def set_device_to_level(roll_offset):
-    """
-    Simple proportional controller to drive the motor until the device is level.
-    roll_offset is captured before launch via calibrate_level() so the rover
-    targets the same orientation it had on the ground, not absolute 0 degrees.
-    """
-
-    print("Starting leveling loop. Press CTRL+C to stop.")
-    print(f"Dead zone: +/- {LEVEL_THRESHOLD} degrees")
-    print(f"Max speed: {MAX_SPEED}%")
-    print()
-
-    while True:
-        # Read Euler angles from BNO055
-        # euler returns (heading, roll, pitch) in degrees
-        euler = imu.euler
-
-        if euler is None or euler[1] is None:
-            print("No IMU data — check wiring!")
-            stop_motor()
-            time.sleep(0.5)
-            continue
-
-        heading, roll, pitch = euler
-
-        # Subtract calibrated offset so tilt = 0 when rover is at its ground-level position
-        # Swap to 'pitch' if your motor corrects front-to-back tilt instead
-        tilt = roll - roll_offset
-
-        # --- Proportional Control ---
-        if abs(tilt) <= LEVEL_THRESHOLD:
-            # Within dead zone — hold still
-            stop_motor()
-            status = "LEVEL"
-            speed_out = 0
-            log_event("ORIENTATION: LEVEL")
-            break
-        else:
-            # Calculate correction speed proportional to tilt angle
-            raw_speed = KP * tilt
-            # Enforce minimum speed so motor actually moves
-            if raw_speed > 0:
-                speed_out = max(MIN_SPEED, min(MAX_SPEED, raw_speed))
-            else:
-                speed_out = min(-MIN_SPEED, max(-MAX_SPEED, raw_speed))
-
-            set_motor(speed_out)
-            status = "CORRECTING"
-            log_event(f"ORIENTATION: CORRECTING | Tilt: {tilt:+.2f}deg | Speed: {speed_out:+.0f}%")
-
-        direction = 1 if enc_b.value else -1
-        log_data(f"Tilt: {tilt:+.1f} deg | Speed: {speed_out:+.0f}% | Enc: {enc_a.count * direction} | Status: {status}")
-        time.sleep(0.05)  # 20Hz control loop
 
 
 # ======================================================================================

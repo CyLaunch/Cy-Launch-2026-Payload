@@ -5,10 +5,10 @@
 # - Level is determined by comparing the Y and Z components of the gravity vector to a
 #   calibrated reference, ignoring the X axis entirely.
 # - The motor will attempt to correct any tilt by running in the appropriate direction
-#   and speed proportional to the signed Y-Z angle from the calibrated reference.
+#   at a constant power until the tilt falls within the dead zone.
 # - A dead zone is implemented to prevent constant small corrections when nearly level.
-# - Tuning parameters (KP, MAX_SPEED, MIN_SPEED) may need adjustment based on your
-#   specific motor and mechanical setup.
+# - Tuning parameters (CORRECTION_SPEED, LEVEL_THRESHOLD) may need adjustment based on
+#   your specific motor and mechanical setup.
 # - NOTE: Orientation motor is on PWM channels 0 and 1. Encoder A on D9, B on D10.
 #
 # Contact: wons123@iastate.edu
@@ -17,7 +17,6 @@
 import time
 import math
 import board
-import countio
 import digitalio
 from adafruit_pca9685 import PCA9685
 import adafruit_bno055
@@ -29,19 +28,25 @@ pca.frequency = 1000
 bno = adafruit_bno055.BNO055_I2C(i2c)
 
 # --- Orientation motor is on CH0 (forward) and CH1 (reverse) ---
-MOTOR_PWM1 = 0
-MOTOR_PWM2 = 1
+MOTOR_PWM1 = 2
+MOTOR_PWM2 = 3
 
-# --- Encoder (D9 = A, D10 = B) ---
-enc_a = countio.Counter(board.D9, edge=countio.Edge.RISE)
-enc_b = digitalio.DigitalInOut(board.D10)
-enc_b.direction = digitalio.Direction.INPUT
+# --- OCC pins (watching all candidates to identify which motor this is) ---
+occ_d6 = digitalio.DigitalInOut(board.D6)
+occ_d6.direction = digitalio.Direction.INPUT
+occ_d6.pull = digitalio.Pull.UP
+
+occ_d9 = digitalio.DigitalInOut(board.D9)
+occ_d9.direction = digitalio.Direction.INPUT
+occ_d9.pull = digitalio.Pull.UP
+
+occ_d10 = digitalio.DigitalInOut(board.D10)
+occ_d10.direction = digitalio.Direction.INPUT
+occ_d10.pull = digitalio.Pull.UP
 
 # --- Tuning Parameters ---
-LEVEL_THRESHOLD = 0.5    # degrees — dead zone around calibrated position
-MAX_SPEED       = 60     # max motor speed %
-MIN_SPEED       = 15     # min speed % to overcome motor stiction
-KP              = 1.5    # proportional gain
+LEVEL_THRESHOLD   = 10   # degrees — dead zone around calibrated position
+CORRECTION_SPEED  = 90  # % power applied whenever tilt exceeds LEVEL_THRESHOLD
 
 # --- Calibration ---
 CALIBRATION_DURATION = 3.0
@@ -117,11 +122,12 @@ def stop_motor():
     set_motor(0)
 
 
+time.sleep(30)
 ref_gravity = calibrate_level()
 
 print("Starting leveling loop. Press CTRL+C to stop.")
 print(f"Dead zone: +/- {LEVEL_THRESHOLD} degrees")
-print(f"Max speed: {MAX_SPEED}%")
+print(f"Correction speed: {CORRECTION_SPEED}%")
 print()
 
 try:
@@ -140,18 +146,19 @@ try:
 
         if angle <= LEVEL_THRESHOLD:
             stop_motor()
+            speed_out = 0
             status = "LEVEL"
         else:
-            raw_speed = KP * tilt
-            if raw_speed > 0:
-                speed_out = max(MIN_SPEED, min(MAX_SPEED, raw_speed))
-            else:
-                speed_out = min(-MIN_SPEED, max(-MAX_SPEED, raw_speed))
+            speed_out = CORRECTION_SPEED if tilt > 0 else -CORRECTION_SPEED
             set_motor(speed_out)
             status = "CORRECTING"
 
-        direction = 1 if enc_b.value else -1
-        print(f"Angle: {angle:+.1f} deg | Speed: {speed_out:+.0f}% | Enc: {enc_a.count * direction} | Status: {status}")
+        occ_str = (
+            f"D6={'OCC' if not occ_d6.value else 'ok'} | "
+            f"D9={'OCC' if not occ_d9.value else 'ok'} | "
+            f"D10={'OCC' if not occ_d10.value else 'ok'}"
+        )
+        print(f"Angle: {angle:+.1f} deg | Speed: {speed_out:+.0f}% | {occ_str} | Status: {status}")
         time.sleep(0.05)
 
 except KeyboardInterrupt:
