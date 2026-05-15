@@ -22,9 +22,9 @@ from adafruit_motor import servo
 LOG_FILE  = "flight_log.txt"
 DATA_FILE = "flight_data.txt"
 
-LAUNCH_ALT_THRESHOLD  = 50   # meters AGL — above this confirms launch
-LANDED_ALT_THRESHOLD  = 10   # meters AGL — below this starts landing timer
-LANDING_HOLD_TIME     = 20  # seconds below LANDED_ALT_THRESHOLD to confirm landing
+LAUNCH_ALT_THRESHOLD  = 1.2   # meters AGL — above this confirms launch
+LANDED_ALT_THRESHOLD  = 0.5   # meters AGL — below this starts landing timer
+LANDING_HOLD_TIME     = 0  # seconds below LANDED_ALT_THRESHOLD to confirm landing
 LANDING_LOCKOUT       = 0   # seconds after launch before landing is evaluated
 
 LAUNCH_CONFIRM = 5             # consecutive readings above threshold to confirm launch
@@ -35,38 +35,29 @@ LOOP_DT = 0.05                 # 20 Hz
 # ======================================================================================
 # Logging
 # ======================================================================================
-def fmt_time(t):
-    t = int(t * 1000)
-    ms = t % 1000
-    t //= 1000
-    s = t % 60
-    t //= 60
-    m = t % 60
-    h = t // 60
-    return f"{h:02d}:{m:02d}:{s:02d}.{ms:03d}"
-
 def log_event(event, altitude=None):
-    timestamp = fmt_time(time.monotonic())
-    if altitude is not None:
-        line = f"[{timestamp}] {event} | Alt: {altitude:.2f}m AGL\n"
-    else:
-        line = f"[{timestamp}] {event}\n"
-    print(line, end="")
-    try:
-        with open(LOG_FILE, "a") as f:
-            f.write(line)
-    except Exception as e:
-        print(f"[LOG ERROR] Could not write to {LOG_FILE}: {e}")
+    # timestamp = time.monotonic()
+    # if altitude is not None:
+    #     line = f"[{timestamp:.3f}s] {event} | Alt: {altitude:.2f}m AGL\n"
+    # else:
+    #     line = f"[{timestamp:.3f}s] {event}\n"
+    # print(line, end="")
+    # try:
+    #     with open(LOG_FILE, "a") as f:
+    #         f.write(line)
+    # except Exception as e:
+    #     print(f"[LOG ERROR] Could not write to {LOG_FILE}: {e}")
+    pass
 
 def log_flight_data(line):
-    timestamp = fmt_time(time.monotonic())
-    entry = f"[{timestamp}] {line}\n"
-    try:
-        with open(DATA_FILE, "a") as f:
-            f.write(entry)
-    except Exception as e:
-        print(f"[LOG ERROR] Could not write to {DATA_FILE}: {e}")
-    
+    timestamp = time.monotonic()
+    # entry = f"[{timestamp:.3f}s] {line}\n"
+    # try:
+    #     with open(DATA_FILE, "a") as f:
+    #         f.write(entry)
+    # except Exception as e:
+    #     print(f"[LOG ERROR] Could not write to {DATA_FILE}: {e}")
+    pass
 
 
 # ======================================================================================
@@ -198,10 +189,8 @@ def run_flight_mode():
             log_event("EVENT: LANDING CONFIRMED", agl)
             print("\nLanding confirmed. Rotating servo to 0 degrees.")
             my_servo.angle = 0
-            log_event("EVENT: SERVO DEPLOYMENT COMPLETE")
-            print("Holding servo at 0 degrees.")
-            while True:  # keep PWM alive to hold servo position
-                time.sleep(1)
+            print("EVENT: SERVO DEPLOYMENT COMPLETE")
+            
 
         time.sleep(LOOP_DT)
 

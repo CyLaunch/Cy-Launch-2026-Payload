@@ -15,10 +15,9 @@ Wiring:
     Yellow (A+)    →    A
     Blue   (B-)    →    B
 
-    Soil Sensor power: 12–24 V DC (brown = VCC, black = GND)
+    Soil Sensor power: 12-24 V DC (brown = VCC, black = GND)
 
-Sensor defaults: Modbus RTU, address 0x01, 4800 baud, 8N1
-    Some sensors ship at 9600 — change BAUD below if you get no response.
+Sensor defaults: Modbus RTU, address 0x01, 9600 baud, 8N1
 """
 
 import board
@@ -28,12 +27,16 @@ import time
 import struct
 
 # ── Configuration ────────────────────────────────────────────────────────────
-BAUD = 4800            # try 9600 if you get no response
+BAUD = 9600
 SLAVE_ADDR = 0x01
-START_REG = 0x0000
-NUM_REGS = 7           # moisture, temp, EC, pH, N, P, K
 DE_RE_PIN = board.D5   # direction control pin → RTS on breakout
 READ_INTERVAL = 5      # seconds between readings
+
+# Register addresses (from datasheet section 2.3)
+REG_PH       = 0x0006  # pH              unit: 0.01 pH
+REG_HUMIDITY = 0x0012  # humidity        unit: 0.1 %RH  (temperature follows at +1)
+REG_EC       = 0x0015  # conductivity    unit: 1 µS/cm
+REG_NPK      = 0x001E  # nitrogen        unit: mg/kg  (phosphorus +1, potassium +2)
 
 # ── CRC-16 (Modbus) ─────────────────────────────────────────────────────────
 def crc16(data: bytes) -> int:
@@ -49,7 +52,7 @@ def crc16(data: bytes) -> int:
 
 # ── Build a Modbus RTU "Read Holding Registers" request ─────────────────────
 def build_read_request(slave: int, start: int, count: int) -> bytes:
-    frame = struct.pack(">B B H H", slave, 0x03, start, count)
+    frame = struct.pack(">BBHH", slave, 0x03, start, count)
     c = crc16(frame)
     frame += struct.pack("<H", c)          # CRC is little-endian in Modbus
     return frame
@@ -64,27 +67,41 @@ def modbus_read(uart, de_re, slave: int, start: int, count: int):
 
     # switch to transmit mode
     de_re.value = True
-    time.sleep(0.001)
+    time.sleep(0.005)          # ≥ 4-byte silent gap required before frame
     uart.write(request)
     # wait for bytes to fully leave the UART shift register
     # at 4800 baud each byte ≈ 2.1 ms — wait for full frame + margin
-    time.sleep(len(request) * 12 / BAUD + 0.005)
+    time.sleep(len(request) * 12 / BAUD + 0.002)
     de_re.value = False                    # back to receive mode
 
-    # expected response length: addr(1) + func(1) + bytecount(1) + data(count*2) + crc(2)
-    expected = 3 + count * 2 + 2
-    deadline = time.monotonic() + 1.0      # 1 s timeout
+    # Collect bytes until we have enough for echo + response (or just response).
+    # The echo (if present) has byte[2] == 0x00 (start-reg high byte); the real
+    # response has byte[2] == count*2 (byte count).  We scan for the response.
+    expected = 3 + count * 2 + 2          # addr+func+bytecount + data + crc
+    max_bytes = len(request) + expected   # worst case: full echo then response
+    deadline = time.monotonic() + 5.0
     buf = bytearray()
 
-    while len(buf) < expected and time.monotonic() < deadline:
+    while len(buf) < max_bytes and time.monotonic() < deadline:
         avail = uart.in_waiting
         if avail:
             buf.extend(uart.read(avail))
         else:
-            time.sleep(0.01)
+            time.sleep(0.005)
 
-    if len(buf) < expected:
+    # Find the start of the real response: slave / 0x03 / (count*2)
+    resp_start = None
+    expected_byte_count = count * 2
+    for i in range(len(buf) - 2):
+        if buf[i] == slave and buf[i + 1] == 0x03 and buf[i + 2] == expected_byte_count:
+            resp_start = i
+            break
+
+    if resp_start is None or len(buf) - resp_start < expected:
+        print(f"  !! Timeout — got {len(buf)} bytes: {bytes(buf).hex()}")
         return None
+
+    buf = buf[resp_start:]
 
     # verify CRC
     payload = buf[: expected - 2]
@@ -106,22 +123,22 @@ def modbus_read(uart, de_re, slave: int, start: int, count: int):
     return values
 
 # ── Pretty-print one reading ────────────────────────────────────────────────
-def print_reading(regs):
-    moisture = regs[0] / 10.0
-    temp_c   = regs[1] / 10.0
-    ec       = regs[2]
-    ph       = regs[3] / 10.0
-    n        = regs[4]
-    p        = regs[5]
-    k        = regs[6]
+def print_reading(ph_r, hum_r, temp_r, ec_r, n_r, p_r, k_r):
+    ph       = ph_r / 100.0    # unit: 0.01 pH
+    moisture = hum_r / 10.0    # unit: 0.1 %RH
+    temp_c   = temp_r / 10.0   # unit: 0.1 °C  (signed — handles sub-zero)
+    ec       = ec_r             # unit: 1 µS/cm
+    n        = n_r              # unit: mg/kg
+    p        = p_r
+    k        = k_r
 
     temp_f = temp_c * 9.0 / 5.0 + 32.0
 
     print("──────────────────────────────────")
-    print(f"  Moisture      : {moisture:.1f} %")
+    print(f"  Moisture      : {moisture:.1f} %RH")
     print(f"  Temperature   : {temp_c:.1f} °C  /  {temp_f:.1f} °F")
     print(f"  Conductivity  : {ec} µS/cm")
-    print(f"  pH            : {ph:.1f}")
+    print(f"  pH            : {ph:.2f}")
     print(f"  Nitrogen  (N) : {n} mg/kg")
     print(f"  Phosphorus(P) : {p} mg/kg")
     print(f"  Potassium (K) : {k} mg/kg")
@@ -146,9 +163,14 @@ print(f"\n7-in-1 Soil Sensor — polling every {READ_INTERVAL}s  (baud {BAUD})\n
 
 # ── Main loop ────────────────────────────────────────────────────────────────
 while True:
-    regs = modbus_read(uart, de_re, SLAVE_ADDR, START_REG, NUM_REGS)
-    if regs is not None:
-        print_reading(regs)
+    ph_regs  = modbus_read(uart, de_re, SLAVE_ADDR, REG_PH,       1)
+    ht_regs  = modbus_read(uart, de_re, SLAVE_ADDR, REG_HUMIDITY,  2)
+    ec_regs  = modbus_read(uart, de_re, SLAVE_ADDR, REG_EC,        1)
+    npk_regs = modbus_read(uart, de_re, SLAVE_ADDR, REG_NPK,       3)
+
+    if all(r is not None for r in [ph_regs, ht_regs, ec_regs, npk_regs]):
+        print_reading(ph_regs[0], ht_regs[0], ht_regs[1],
+                      ec_regs[0], npk_regs[0], npk_regs[1], npk_regs[2])
     else:
         print("  !! No valid response — check wiring, baud rate, and sensor power")
     time.sleep(READ_INTERVAL)
